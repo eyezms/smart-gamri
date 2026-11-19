@@ -12,6 +12,19 @@ st.title("🏗️ 공사감리일지 & 체크리스트 앱")
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
 
+def parse_item(raw):
+    """checklist_db.json의 어떤 키 구조든 안전하게 (구분, 검사항목)으로 추출"""
+    if isinstance(raw, str):
+        return "기본업무", raw
+    if isinstance(raw, dict):
+        cat = raw.get("cat") or raw.get("category") or raw.get("구분") or raw.get("type") or "기본업무"
+        text = raw.get("item") or raw.get("text") or raw.get("content") or raw.get("검사항목") or raw.get("title")
+        if not text:
+            vals = [str(v) for v in raw.values() if v]
+            text = vals[-1] if vals else ""
+        return str(cat), str(text)
+    return "기본업무", str(raw)
+
 # 1. 감리 구분 및 공사 개요 (담당자 이름 모두 공란 처리)
 st.subheader("1. 감리 구분 및 공사 개요")
 gubun = st.radio("감리업무 구분", ["비상주 감리", "책임상주 감리"], horizontal=True)
@@ -35,11 +48,12 @@ check_results = {}
 for proc in selected_procs:
     with st.expander(f"📋 {proc} 점검항목", expanded=True):
         check_results[proc] = []
-        for idx, item in enumerate(DB[gubun][proc]):
+        for idx, raw_item in enumerate(DB[gubun][proc]):
+            cat_str, item_str = parse_item(raw_item)
             col_t, col_r = st.columns([3, 1])
-            col_t.write(f"**[{item['cat']}]** {item['item']}")
+            col_t.write(f"**[{cat_str}]** {item_str}")
             res = col_r.selectbox("결과", ["적합", "부적합", "해당없음"], key=f"{proc}_{idx}", label_visibility="collapsed")
-            check_results[proc].append({"cat": item["cat"], "item": item["item"], "res": res})
+            check_results[proc].append({"cat": cat_str, "item": item_str, "res": res})
 
 # 3. 특기사항 및 지적사항
 st.subheader("3. 특기사항 및 지적사항")
