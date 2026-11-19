@@ -1,5 +1,5 @@
 import streamlit as st
-import json, os, subprocess, tempfile
+import json, os, subprocess, tempfile, io
 from datetime import date
 from PIL import Image, ImageOps
 from docx import Document
@@ -11,7 +11,7 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v2.3)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v2.4)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
@@ -28,7 +28,7 @@ def parse_item(raw):
         return str(cat), str(text)
     return "기본업무", str(raw)
 
-# 1. 감리 구분 및 공사 개요 (담당자 이름 모두 공란)
+# 1. 감리 구분 및 공사 개요 (담당자 모두 공란)
 st.subheader("1. 감리 구분 및 공사 개요")
 gubun = st.radio("감리업무 구분", ["비상주 감리", "책임상주 감리"], horizontal=True)
 site_name = st.text_input("공사명", value="서탄산업단지 (주)노바테크놀러지스 신축공사")
@@ -63,33 +63,55 @@ st.subheader("3. 특기사항 및 지적사항")
 special_note = st.text_area("특기사항", value="- 해당공정 인부 안전관리 철저 주문\n- 용접공정이나 기타 인화물질자재 사용시 화재 안전기준 철저 주문")
 issue_note = st.text_area("지적사항 및 처리결과", value="")
 
-# 4. 현장 사진 업로드 및 미리보기
+# 4. 현장 사진 업로드
 st.subheader("4. 📸 현장 사진 업로드 (사진대지 자동 병합)")
-photos = st.file_uploader("현장 사진 선택 (여러 장 가능)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
-photo_captions = []
-if photos:
-    st.success(f"✅ 총 {len(photos)}장의 사진이 정상 인식되었습니다.")
+uploaded_photos = st.file_uploader("현장 사진 선택 (여러 장 선택 가능)", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
+photo_data_list = []
+if uploaded_photos:
+    st.success(f"✅ 총 {len(uploaded_photos)}장 사진 업로드 완료 (PDF 맨 뒤에 자동 첨부됩니다)")
     cols = st.columns(2)
-    for i, pf in enumerate(photos):
+    for i, pf in enumerate(uploaded_photos):
+        raw_bytes = pf.getvalue()
         with cols[i % 2]:
-            st.image(pf, caption=f"사진 {i+1}", use_container_width=True)
+            st.image(raw_bytes, caption=f"사진 {i+1}", use_container_width=True)
             cap = st.text_input(f"사진 {i+1} 설명", value=f"시공 현황 ({location})", key=f"cap_{i}")
-            photo_captions.append(cap)
+            photo_data_list.append((raw_bytes, cap))
 
-# 5. 서명(도장) 첨부
+# 5. 결재 도장/서명 첨부
 st.subheader("5. ✍️ 결재 도장/서명 첨부")
 s1, s2 = st.columns(2)
 stamp_insp = s1.file_uploader("건축사보(감리원) 도장/서명", type=["png", "jpg", "jpeg"])
 stamp_chief = s2.file_uploader("총괄감리책임자 도장/서명", type=["png", "jpg", "jpeg"])
 
-# --- 워드 표 스타일 유틸리티 ---
-def set_col_widths(table, widths):
+# --- XML 고정 레이아웃 유틸리티 ---
+def fix_table_layout(table, col_widths_mm):
     table.autofit = False
-    for row in table.rows:
-        for idx, w in enumerate(widths):
-            row.cells[idx].width = w
+    tblPr = table._tbl.tblPr
+    tblLayout = OxmlElement('w:tblLayout')
+    tblLayout.set(qn('w:type'), 'fixed')
+    tblPr.append(tblLayout)
 
-def set_cell_margins(cell, top=30, bottom=30, left=60, right=60):
+    tblGrid = table._tbl.tblGrid
+    for child in list(tblGrid):
+        tblGrid.remove(child)
+    for w_mm in col_widths_mm:
+        gridCol = OxmlElement('w:gridCol')
+        gridCol.set(qn('w:w'), str(int(w_mm * 56.7)))
+        tblGrid.append(gridCol)
+
+    for row in table.rows:
+        for idx, w_mm in enumerate(col_widths_mm):
+            cell = row.cells[idx]
+            cell.width = Mm(w_mm)
+            tcPr = cell._tc.get_or_add_tcPr()
+            for old in tcPr.findall(qn('w:tcW')):
+                tcPr.remove(old)
+            tcW = OxmlElement('w:tcW')
+            tcW.set(qn('w:w'), str(int(w_mm * 56.7)))
+            tcW.set(qn('w:type'), 'dxa')
+            tcPr.append(tcW)
+
+def set_cell_margins(cell, top=35, bottom=35, left=60, right=60):
     tcPr = cell._tc.get_or_add_tcPr()
     tcMar = OxmlElement('w:tcMar')
     for m, val in [('top', top), ('bottom', bottom), ('left', left), ('right', right)]:
@@ -135,7 +157,7 @@ def build_diary(tmpdir, date_str, si_path, sc_path):
     tbl = doc.add_table(rows=7 + len(check_results), cols=4)
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     tbl.style = "Table Grid"
-    set_col_widths(tbl, [Mm(34), Mm(92), Mm(30), Mm(30)])
+    fix_table_layout(tbl, [34, 92, 30, 30])
 
     style_cell(tbl.cell(0, 0).merge(tbl.cell(1, 1)), "공 사 감 리 일 지", 16, True, WD_ALIGN_PARAGRAPH.CENTER)
     style_cell(tbl.cell(0, 2), "건축사보", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
@@ -189,7 +211,7 @@ def build_chk(tmpdir, idx, proc, items, short_date):
     tbl = doc.add_table(rows=5 + len(items), cols=5)
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     tbl.style = "Table Grid"
-    set_col_widths(tbl, [Mm(22), Mm(104), Mm(14), Mm(16), Mm(30)])
+    fix_table_layout(tbl, [24, 98, 16, 18, 30])
 
     style_cell(tbl.cell(0, 0).merge(tbl.cell(0, 3)), "공 종 별  감 리  체 크 리 스 트", 14, True, WD_ALIGN_PARAGRAPH.CENTER)
     style_cell(tbl.cell(0, 4), "문서번호 :\n", 8)
@@ -222,35 +244,33 @@ def build_chk(tmpdir, idx, proc, items, short_date):
     doc.save(out)
     return out
 
-def build_photos(photo_files, captions, tmpdir):
+def build_photos(p_list, tmpdir):
     doc = make_doc()
     p_title = doc.add_paragraph("■ 현장 감리 사진대지")
     p_title.runs[0].font.size = Pt(12)
     p_title.runs[0].bold = True
 
-    tbl = doc.add_table(rows=0, cols=2)
+    num_rows = (len(p_list) + 1) // 2
+    tbl = doc.add_table(rows=num_rows, cols=2)
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     tbl.style = "Table Grid"
-    tbl.autofit = False
+    fix_table_layout(tbl, [93, 93])
 
-    for i in range(0, len(photo_files), 2):
-        row = tbl.add_row().cells
-        row[0].width, row[1].width = Mm(93), Mm(93)
+    for i in range(0, len(p_list), 2):
+        row = tbl.rows[i // 2].cells
         for j in range(2):
-            if i + j < len(photo_files):
-                pf = photo_files[i + j]
-                pf.seek(0)
-                img = ImageOps.exif_transpose(Image.open(pf)).convert("RGB")
+            if i + j < len(p_list):
+                raw_bytes, cap_txt = p_list[i + j]
+                img = ImageOps.exif_transpose(Image.open(io.BytesIO(raw_bytes))).convert("RGB")
                 img.thumbnail((1000, 1000))
                 pp = os.path.join(tmpdir, f"clean_p_{i+j}.jpg")
                 img.save(pp, format="JPEG", quality=85)
 
-                set_cell_margins(row[j], 40, 40, 40, 40)
+                set_cell_margins(row[j], 45, 45, 45, 45)
                 p_img = row[j].paragraphs[0]
                 p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                p_img.add_run().add_picture(pp, width=Mm(85))
+                p_img.add_run().add_picture(pp, width=Mm(82))
 
-                cap_txt = captions[i + j] if i + j < len(captions) else ""
                 p_cap = row[j].add_paragraph(f"[사진 {i+j+1}] {cap_txt}")
                 p_cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 p_cap.runs[0].font.size = Pt(8.5)
@@ -271,19 +291,17 @@ if st.button("📄 통합 감리일지 PDF 생성", type="primary", use_containe
 
                 si_p, sc_p = None, None
                 if stamp_insp:
-                    stamp_insp.seek(0)
                     si_p = os.path.join(tmpdir, "si.png")
-                    Image.open(stamp_insp).save(si_p)
+                    Image.open(io.BytesIO(stamp_insp.getvalue())).save(si_p)
                 if stamp_chief:
-                    stamp_chief.seek(0)
                     sc_p = os.path.join(tmpdir, "sc.png")
-                    Image.open(stamp_chief).save(sc_p)
+                    Image.open(io.BytesIO(stamp_chief.getvalue())).save(sc_p)
 
                 docs = [build_diary(tmpdir, date_str, si_p, sc_p)]
                 for idx, (proc, items) in enumerate(check_results.items()):
                     docs.append(build_chk(tmpdir, idx, proc, items, short_date))
-                if photos:
-                    docs.append(build_photos(photos, photo_captions, tmpdir))
+                if photo_data_list:
+                    docs.append(build_photos(photo_data_list, tmpdir))
 
                 writer = PdfWriter()
                 for dp in docs:
