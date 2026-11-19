@@ -11,24 +11,55 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v2.7)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v2.8)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
 
-def parse_item(raw):
+def clean_txt(t):
+    return re.sub(r'^[☑☐■□✓✔•\-\s]+', '', str(t)).strip()
+
+def get_proc_items(proc_data):
+    """기본업무 / 기본외업무 구분을 100% 보존하여 (구분, 검사항목) 리스트로 반환"""
+    result = []
+    # 케이스 1: {"기본업무": [...], "기본외업무": [...]} 형태인 경우
+    if isinstance(proc_data, dict):
+        for cat_key, items_list in proc_data.items():
+            if isinstance(items_list, list):
+                for raw in items_list:
+                    _, txt = parse_single(raw, default_cat=cat_key)
+                    result.append((str(cat_key), txt))
+        return result
+
+    # 케이스 2: [{"구분": "기본외업무", "검사항목": "..."}, ...] 리스트 형태인 경우
+    if isinstance(proc_data, list):
+        for raw in proc_data:
+            cat, txt = parse_single(raw, default_cat="기본업무")
+            result.append((cat, txt))
+    return result
+
+def parse_single(raw, default_cat="기본업무"):
     if isinstance(raw, str):
-        cat, text = "기본업무", raw
-    elif isinstance(raw, dict):
-        cat = raw.get("cat") or raw.get("category") or raw.get("구분") or "기본업무"
-        text = raw.get("item") or raw.get("text") or raw.get("content") or raw.get("검사항목") or ""
+        # 문자열 앞부분에 [기본외업무] 등이 포함된 경우 분리
+        m = re.match(r'^\[?(기본\s*외\s*업무|기본\s*업무)\]?\s*(.+)', raw)
+        if m:
+            return m.group(1).replace(" ", ""), clean_txt(m.group(2))
+        return default_cat, clean_txt(raw)
+    if isinstance(raw, dict):
+        cat = default_cat
+        text = ""
+        for k, v in raw.items():
+            k_str = str(k).lower()
+            v_str = str(v).strip()
+            if any(x in k_str for x in ["cat", "구분", "type", "gubun", "div"]) or v_str in ["기본업무", "기본외업무", "기본 외 업무"]:
+                cat = v_str
+            elif any(x in k_str for x in ["item", "text", "content", "검사항목", "항목", "title", "desc"]):
+                text = v_str
         if not text:
-            vals = [str(v) for v in raw.values() if v]
+            vals = [str(v).strip() for v in raw.values() if str(v).strip() and str(v).strip() != cat]
             text = vals[-1] if vals else ""
-    else:
-        cat, text = "기본업무", str(raw)
-    text = re.sub(r'^[☑☐■□✓✔•\-\s]+', '', str(text)).strip()
-    return str(cat), text
+        return cat, clean_txt(text)
+    return default_cat, clean_txt(raw)
 
 # 1. 감리 구분 및 공사 개요 (담당자 모두 공란)
 st.subheader("1. 감리 구분 및 공사 개요")
@@ -45,7 +76,7 @@ inspector = c4.text_input("건축사보(감리원)", value="", placeholder="성�
 chief_supervisor = c5.text_input("총괄감리책임자", value="", placeholder="성명 입력")
 contractor = c6.text_input("총괄 시공 책임자", value="", placeholder="성명 입력")
 
-# 2. 공종별 체크리스트
+# 2. 공종별 체크리스트 (기본업무 / 기본외업무 구분 표시)
 st.subheader(f"2. [{gubun}] 공종별 체크리스트")
 selected_procs = st.multiselect("금일 감리 공종 선택", list(DB[gubun].keys()))
 
@@ -53,10 +84,11 @@ check_results = {}
 for proc in selected_procs:
     with st.expander(f"📋 {proc} 점검항목", expanded=True):
         check_results[proc] = []
-        for idx, raw_item in enumerate(DB[gubun][proc]):
-            cat_str, item_str = parse_item(raw_item)
+        parsed_list = get_proc_items(DB[gubun][proc])
+        for idx, (cat_str, item_str) in enumerate(parsed_list):
             col_t, col_r = st.columns([3, 1])
-            col_t.write(f"**[{cat_str}]** {item_str}")
+            badge = "🔵" if "외" in cat_str else "🟢"
+            col_t.write(f"{badge} **[{cat_str}]** {item_str}")
             res = col_r.selectbox("결과", ["적합", "부적합", "해당없음"], key=f"{proc}_{idx}", label_visibility="collapsed")
             check_results[proc].append({"cat": cat_str, "item": item_str, "res": res})
 
@@ -65,7 +97,7 @@ st.subheader("3. 특기사항 및 지적사항")
 special_note = st.text_area("특기사항", value="- 해당공정 인부 안전관리 철저 주문\n- 용접공정이나 기타 인화물질자재 사용시 화재 안전기준 철저 주문")
 issue_note = st.text_area("지적사항 및 처리결과", value="")
 
-# 4. 현장 사진 업로드 (모바일 호환성 강화 + 세션 영구 보관)
+# 4. 현장 사진 업로드
 st.subheader("4. 📸 현장 사진 업로드 (사진대지 자동 병합)")
 if "saved_photos" not in st.session_state:
     st.session_state["saved_photos"] = []
@@ -219,7 +251,7 @@ def build_diary(tmpdir, date_str, si_path, sc_path):
 
     r = 5
     for proc, items in check_results.items():
-        lines = [f"• {x['item']} ({x['res']})" for x in items if x['res'] != "해당없음"]
+        lines = [f"• [{x['cat']}] {x['item']} ({x['res']})" for x in items if x['res'] != "해당없음"]
         set_row_height(tbl.rows[r], 45)
         style_cell(tbl.cell(r, 0), proc, 9.5, True, WD_ALIGN_PARAGRAPH.CENTER)
         style_cell(tbl.cell(r, 1).merge(tbl.cell(r, 4)), "\n".join(lines), 8.5)
