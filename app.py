@@ -11,7 +11,7 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v2.8)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v2.9)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
@@ -22,7 +22,6 @@ def clean_txt(t):
 def get_proc_items(proc_data):
     """기본업무 / 기본외업무 구분을 100% 보존하여 (구분, 검사항목) 리스트로 반환"""
     result = []
-    # 케이스 1: {"기본업무": [...], "기본외업무": [...]} 형태인 경우
     if isinstance(proc_data, dict):
         for cat_key, items_list in proc_data.items():
             if isinstance(items_list, list):
@@ -30,8 +29,6 @@ def get_proc_items(proc_data):
                     _, txt = parse_single(raw, default_cat=cat_key)
                     result.append((str(cat_key), txt))
         return result
-
-    # 케이스 2: [{"구분": "기본외업무", "검사항목": "..."}, ...] 리스트 형태인 경우
     if isinstance(proc_data, list):
         for raw in proc_data:
             cat, txt = parse_single(raw, default_cat="기본업무")
@@ -40,7 +37,6 @@ def get_proc_items(proc_data):
 
 def parse_single(raw, default_cat="기본업무"):
     if isinstance(raw, str):
-        # 문자열 앞부분에 [기본외업무] 등이 포함된 경우 분리
         m = re.match(r'^\[?(기본\s*외\s*업무|기본\s*업무)\]?\s*(.+)', raw)
         if m:
             return m.group(1).replace(" ", ""), clean_txt(m.group(2))
@@ -76,20 +72,34 @@ inspector = c4.text_input("건축사보(감리원)", value="", placeholder="성�
 chief_supervisor = c5.text_input("총괄감리책임자", value="", placeholder="성명 입력")
 contractor = c6.text_input("총괄 시공 책임자", value="", placeholder="성명 입력")
 
-# 2. 공종별 체크리스트 (기본업무 / 기본외업무 구분 표시)
+# 2. 공종별 체크리스트 (전체 / 기본업무 / 기본외 업무 필터 복원)
 st.subheader(f"2. [{gubun}] 공종별 체크리스트")
+task_filter = st.radio("업무 구분 선택", ["전체", "기본업무", "기본외 업무"], horizontal=True)
 selected_procs = st.multiselect("금일 감리 공종 선택", list(DB[gubun].keys()))
 
 check_results = {}
 for proc in selected_procs:
-    with st.expander(f"📋 {proc} 점검항목", expanded=True):
+    parsed_list = get_proc_items(DB[gubun][proc])
+    # 선택된 업무 구분에 따라 항목 필터링
+    filtered_list = []
+    for cat_str, item_str in parsed_list:
+        is_extra = "외" in cat_str.replace(" ", "")
+        if task_filter == "전체":
+            filtered_list.append((cat_str, item_str))
+        elif task_filter == "기본업무" and not is_extra:
+            filtered_list.append((cat_str, item_str))
+        elif task_filter == "기본외 업무" and is_extra:
+            filtered_list.append((cat_str, item_str))
+
+    with st.expander(f"📋 {proc} 점검항목 ({task_filter}: {len(filtered_list)}건)", expanded=True):
         check_results[proc] = []
-        parsed_list = get_proc_items(DB[gubun][proc])
-        for idx, (cat_str, item_str) in enumerate(parsed_list):
+        if not filtered_list:
+            st.info(f"선택한 '{task_filter}'에 해당하는 항목이 없습니다.")
+        for idx, (cat_str, item_str) in enumerate(filtered_list):
             col_t, col_r = st.columns([3, 1])
             badge = "🔵" if "외" in cat_str else "🟢"
             col_t.write(f"{badge} **[{cat_str}]** {item_str}")
-            res = col_r.selectbox("결과", ["적합", "부적합", "해당없음"], key=f"{proc}_{idx}", label_visibility="collapsed")
+            res = col_r.selectbox("결과", ["적합", "부적합", "해당없음"], key=f"{proc}_{task_filter}_{idx}", label_visibility="collapsed")
             check_results[proc].append({"cat": cat_str, "item": item_str, "res": res})
 
 # 3. 특기사항 및 지적사항
@@ -283,7 +293,7 @@ def build_diary(tmpdir, date_str, si_path, sc_path):
 
 def build_chk(tmpdir, idx, proc, items, short_date):
     doc = make_doc()
-    p0 = doc.add_paragraph(f"■ 건축공사 감리세부기준 [별표 1] ({gubun})")
+    p0 = doc.add_paragraph(f"■ 건축공사 감리세부기준 [별표 1] ({gubun} - {task_filter})")
     p0.paragraph_format.space_after = Pt(3)
     p0.runs[0].font.size = Pt(8.5)
 
@@ -387,7 +397,8 @@ if st.button("📄 통합 감리일지 PDF 생성", type="primary", use_containe
 
                 docs = [build_diary(tmpdir, date_str, si_p, sc_p)]
                 for idx, (proc, items) in enumerate(check_results.items()):
-                    docs.append(build_chk(tmpdir, idx, proc, items, short_date))
+                    if items:
+                        docs.append(build_chk(tmpdir, idx, proc, items, short_date))
                 if photo_data_list:
                     docs.append(build_photos(photo_data_list, tmpdir))
 
