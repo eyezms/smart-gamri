@@ -7,13 +7,12 @@ from docx import Document
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 앱")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v2.0)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
 
 def parse_item(raw):
-    """checklist_db.json의 어떤 키 구조든 안전하게 (구분, 검사항목)으로 추출"""
     if isinstance(raw, str):
         return "기본업무", raw
     if isinstance(raw, dict):
@@ -60,12 +59,17 @@ st.subheader("3. 특기사항 및 지적사항")
 special_note = st.text_area("특기사항", value="- 해당공정 인부 안전관리 철저 주문\n- 용접공정이나 기타 인화물질자재 사용시 화재 안전기준 철저 주문")
 issue_note = st.text_area("지적사항 및 처리결과", value="")
 
-# 4. 서명(도장) 및 현장 사진 첨부
-st.subheader("4. 서명(도장) 및 현장 사진 첨부")
+# 4. 현장 사진 업로드 (사진대지 자동 생성)
+st.subheader("4. 📸 현장 사진 업로드 (사진대지 자동 병합)")
+photos = st.file_uploader("현장 사진 선택 (갤러리에서 여러 장 선택 가능)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+if photos:
+    st.success(f"총 {len(photos)}장의 현장 사진이 첨부되었습니다.")
+
+# 5. 서명(도장) 첨부
+st.subheader("5. ✍️ 결재 도장/서명 첨부")
 s1, s2 = st.columns(2)
 stamp_insp = s1.file_uploader("건축사보(감리원) 도장/서명", type=["png", "jpg", "jpeg"])
 stamp_chief = s2.file_uploader("총괄감리책임자 도장/서명", type=["png", "jpg", "jpeg"])
-photos = st.file_uploader("현장 사진 첨부 (여러 장 선택 가능)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
 def build_photo_docx(photo_files, tmpdir):
     doc = Document()
