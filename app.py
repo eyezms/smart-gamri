@@ -11,7 +11,7 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v3.2)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v3.3)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
@@ -19,24 +19,31 @@ with open("checklist_db.json", "r", encoding="utf-8") as f:
 def clean_txt(t):
     return re.sub(r'^[☑☐■□✓✔•\-\s]+', '', str(t)).strip()
 
+def is_extra(c):
+    s = str(c).replace(" ", "")
+    return ("외" in s) or ("추가" in s)
+
 def parse_single(raw, default_cat="기본업무"):
     if isinstance(raw, str):
         m = re.match(r'^\[?(기본\s*업무\s*외|기본\s*외\s*업무|기본\s*업무|기본\s*외)\]?\s*(.+)', raw)
-        return (m.group(1).strip(), clean_txt(m.group(2))) if m else (default_cat, clean_txt(raw))
+        return (m.group(1).replace(" ", ""), clean_txt(m.group(2))) if m else (default_cat, clean_txt(raw))
     if isinstance(raw, dict):
         cat, text = None, None
+        # 1. 명시적 구분/항목 키 매핑
         for k, v in raw.items():
-            kl, vs = str(k).lower(), str(v).strip()
-            if kl in ["cat", "category", "구분", "type", "gubun", "div", "section"]:
+            kl, vs = str(k).lower().strip(), str(v).strip()
+            if kl in ["cat", "category", "구분", "type", "gubun", "div", "section", "업무구분"]:
                 cat = vs
-            elif kl in ["item", "text", "content", "검사항목", "항목", "title", "desc", "question"]:
+            elif kl in ["item", "text", "content", "검사항목", "항목", "title", "desc", "question", "내용"]:
                 text = vs
-        if cat is None or text is None:
-            for sv in [str(v).strip() for v in raw.values() if v is not None and str(v).strip()]:
-                if cat is None and len(sv) <= 15 and any(w in sv for w in ["업무", "기본", "외"]):
-                    cat = sv
-                elif text is None and sv != cat:
-                    text = sv
+        # 2. 값 내용 기반 판별 ('기본외업무' 등이 다른 키에 들어있는 경우 포착)
+        for k, v in raw.items():
+            vs = str(v).strip()
+            if not vs: continue
+            if ("기본" in vs and "업무" in vs) or vs in ["기본업무", "기본외업무", "기본 외 업무", "기본업무 외"]:
+                cat = vs
+            elif text is None and vs != cat:
+                text = vs
         return (cat or default_cat), clean_txt(text or "")
     return default_cat, clean_txt(raw)
 
@@ -45,14 +52,14 @@ def get_proc_items(proc_data):
     if isinstance(proc_data, dict):
         for ck, ilist in proc_data.items():
             if isinstance(ilist, list):
-                res.extend((str(ck), parse_single(r, str(ck))[1]) for r in ilist)
+                for r in ilist:
+                    c_parsed, t_parsed = parse_single(r, str(ck))
+                    final_cat = str(ck) if ("기본" in str(ck) or "외" in str(ck)) else c_parsed
+                    res.append((final_cat, t_parsed))
     elif isinstance(proc_data, list):
-        res.extend(parse_single(r, "기본업무") for r in proc_data)
+        for r in proc_data:
+            res.append(parse_single(r, "기본업무"))
     return res
-
-def is_extra(c):
-    s = str(c).replace(" ", "")
-    return ("외" in s) or ("추가" in s)
 
 # 1. 감리 구분 및 공사 개요 (담당자 모두 공란)
 st.subheader("1. 감리 구분 및 공사 개요")
@@ -69,13 +76,9 @@ inspector = c4.text_input("건축사보(감리원)", value="", placeholder="성�
 chief_supervisor = c5.text_input("총괄감리책임자", value="", placeholder="성명 입력")
 contractor = c6.text_input("총괄 시공 책임자", value="", placeholder="성명 입력")
 
-# 2. 공종별 체크리스트 (기본업무 = 기본만 / 기본외 업무 = 기본+기본외 전체)
+# 2. 공종별 체크리스트 (기본업무 = 기본만 / 기본외업무 = 구분 내용 전체)
 st.subheader(f"2. [{gubun}] 공종별 체크리스트")
-task_mode = st.radio(
-    "업무 범위 선택",
-    ["기본업무", "기본외 업무 (기본업무 포함)"],
-    horizontal=True
-)
+task_mode = st.radio("업무 구분 선택", ["기본업무", "기본외업무"], horizontal=True)
 selected_procs = st.multiselect("금일 감리 공종 선택", list(DB[gubun].keys()))
 
 check_results = {}
@@ -87,9 +90,9 @@ for proc in selected_procs:
     if task_mode == "기본업무":
         flist = [(c, t) for c, t in plist if not is_extra(c)]
     else:
-        flist = plist  # 기본업무 + 기본외 업무 모두 포함
+        flist = plist  # 기본외업무 선택 시 기본업무 + 기본외업무 전체 출력
 
-    with st.expander(f"📋 {proc} (기본 {b_cnt}건 / 기본외 {e_cnt}건) → 적용: {len(flist)}건", expanded=True):
+    with st.expander(f"📋 {proc} (기본 {b_cnt}건 / 기본외 {e_cnt}건) → 출력: {len(flist)}건", expanded=True):
         check_results[proc] = []
         for idx, (c_str, i_str) in enumerate(flist):
             col_t, col_r = st.columns([3, 1])
