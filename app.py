@@ -1,5 +1,5 @@
 import streamlit as st
-import json, os, subprocess, tempfile, io
+import json, os, subprocess, tempfile, io, re
 from datetime import date
 from PIL import Image, ImageOps
 from docx import Document
@@ -11,22 +11,24 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v2.4)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v2.7)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
 
 def parse_item(raw):
     if isinstance(raw, str):
-        return "기본업무", raw
-    if isinstance(raw, dict):
+        cat, text = "기본업무", raw
+    elif isinstance(raw, dict):
         cat = raw.get("cat") or raw.get("category") or raw.get("구분") or "기본업무"
         text = raw.get("item") or raw.get("text") or raw.get("content") or raw.get("검사항목") or ""
         if not text:
             vals = [str(v) for v in raw.values() if v]
             text = vals[-1] if vals else ""
-        return str(cat), str(text)
-    return "기본업무", str(raw)
+    else:
+        cat, text = "기본업무", str(raw)
+    text = re.sub(r'^[☑☐■□✓✔•\-\s]+', '', str(text)).strip()
+    return str(cat), text
 
 # 1. 감리 구분 및 공사 개요 (담당자 모두 공란)
 st.subheader("1. 감리 구분 및 공사 개요")
@@ -63,19 +65,45 @@ st.subheader("3. 특기사항 및 지적사항")
 special_note = st.text_area("특기사항", value="- 해당공정 인부 안전관리 철저 주문\n- 용접공정이나 기타 인화물질자재 사용시 화재 안전기준 철저 주문")
 issue_note = st.text_area("지적사항 및 처리결과", value="")
 
-# 4. 현장 사진 업로드
+# 4. 현장 사진 업로드 (모바일 호환성 강화 + 세션 영구 보관)
 st.subheader("4. 📸 현장 사진 업로드 (사진대지 자동 병합)")
-uploaded_photos = st.file_uploader("현장 사진 선택 (여러 장 선택 가능)", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
-photo_data_list = []
+if "saved_photos" not in st.session_state:
+    st.session_state["saved_photos"] = []
+
+uploaded_photos = st.file_uploader(
+    "현장 사진 선택 (갤러리/파일에서 여러 장 선택)",
+    accept_multiple_files=True,
+    key="photo_uploader"
+)
 if uploaded_photos:
-    st.success(f"✅ 총 {len(uploaded_photos)}장 사진 업로드 완료 (PDF 맨 뒤에 자동 첨부됩니다)")
+    new_list = []
+    for pf in uploaded_photos:
+        try:
+            raw_b = pf.getvalue()
+            img = ImageOps.exif_transpose(Image.open(io.BytesIO(raw_b))).convert("RGB")
+            img.thumbnail((1000, 1000))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            new_list.append((pf.name, buf.getvalue()))
+        except Exception as e:
+            st.error(f"이미지 처리 오류 ({pf.name}): {e}")
+    if new_list:
+        st.session_state["saved_photos"] = new_list
+
+photo_data_list = []
+if st.session_state["saved_photos"]:
+    col_info, col_clr = st.columns([3, 1])
+    col_info.success(f"✅ 총 {len(st.session_state['saved_photos'])}장 사진 준비 완료 (PDF 맨 뒤에 병합됩니다)")
+    if col_clr.button("사진 초기화"):
+        st.session_state["saved_photos"] = []
+        st.rerun()
+
     cols = st.columns(2)
-    for i, pf in enumerate(uploaded_photos):
-        raw_bytes = pf.getvalue()
+    for i, (fname, clean_bytes) in enumerate(st.session_state["saved_photos"]):
         with cols[i % 2]:
-            st.image(raw_bytes, caption=f"사진 {i+1}", use_container_width=True)
+            st.image(clean_bytes, caption=f"사진 {i+1}", use_container_width=True)
             cap = st.text_input(f"사진 {i+1} 설명", value=f"시공 현황 ({location})", key=f"cap_{i}")
-            photo_data_list.append((raw_bytes, cap))
+            photo_data_list.append((clean_bytes, cap))
 
 # 5. 결재 도장/서명 첨부
 st.subheader("5. ✍️ 결재 도장/서명 첨부")
@@ -83,7 +111,7 @@ s1, s2 = st.columns(2)
 stamp_insp = s1.file_uploader("건축사보(감리원) 도장/서명", type=["png", "jpg", "jpeg"])
 stamp_chief = s2.file_uploader("총괄감리책임자 도장/서명", type=["png", "jpg", "jpeg"])
 
-# --- XML 고정 레이아웃 유틸리티 ---
+# --- 원본 법정 서식 정밀 렌더링 유틸리티 ---
 def fix_table_layout(table, col_widths_mm):
     table.autofit = False
     tblPr = table._tbl.tblPr
@@ -111,7 +139,14 @@ def fix_table_layout(table, col_widths_mm):
             tcW.set(qn('w:type'), 'dxa')
             tcPr.append(tcW)
 
-def set_cell_margins(cell, top=35, bottom=35, left=60, right=60):
+def set_row_height(row, height_mm):
+    trPr = row._tr.get_or_add_trPr()
+    trHeight = OxmlElement('w:trHeight')
+    trHeight.set(qn('w:val'), str(int(height_mm * 56.7)))
+    trHeight.set(qn('w:hRule'), 'atLeast')
+    trPr.append(trHeight)
+
+def set_cell_margins(cell, top=45, bottom=45, left=70, right=70):
     tcPr = cell._tc.get_or_add_tcPr()
     tcMar = OxmlElement('w:tcMar')
     for m, val in [('top', top), ('bottom', bottom), ('left', left), ('right', right)]:
@@ -121,7 +156,7 @@ def set_cell_margins(cell, top=35, bottom=35, left=60, right=60):
         tcMar.append(node)
     tcPr.append(tcMar)
 
-def style_cell(cell, text="", size=8.5, bold=False, align=WD_ALIGN_PARAGRAPH.LEFT, bg=None, img_path=None):
+def style_cell(cell, text="", size=9, bold=False, align=WD_ALIGN_PARAGRAPH.LEFT, bg=None, img_path=None):
     cell.text = ""
     cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
     set_cell_margins(cell)
@@ -131,7 +166,7 @@ def style_cell(cell, text="", size=8.5, bold=False, align=WD_ALIGN_PARAGRAPH.LEF
     p.alignment = align
     p.paragraph_format.space_before = Pt(0)
     p.paragraph_format.space_after = Pt(0)
-    p.paragraph_format.line_spacing = 1.08
+    p.paragraph_format.line_spacing = 1.12
     if text:
         run = p.add_run(text)
         run.font.name = "NanumGothic"
@@ -139,7 +174,7 @@ def style_cell(cell, text="", size=8.5, bold=False, align=WD_ALIGN_PARAGRAPH.LEF
         run.font.size = Pt(size)
         run.bold = bold
     if img_path and os.path.exists(img_path):
-        p.add_run().add_picture(img_path, width=Mm(11))
+        p.add_run().add_picture(img_path, width=Mm(12))
 
 def make_doc():
     d = Document()
@@ -151,40 +186,52 @@ def make_doc():
 def build_diary(tmpdir, date_str, si_path, sc_path):
     doc = make_doc()
     p0 = doc.add_paragraph("■ 건축공사 감리세부기준 [별지 제2호서식] <개정 2017. 2. 4.>")
-    p0.paragraph_format.space_after = Pt(2)
+    p0.paragraph_format.space_after = Pt(3)
     p0.runs[0].font.size = Pt(8)
 
-    tbl = doc.add_table(rows=7 + len(check_results), cols=4)
+    tbl = doc.add_table(rows=7 + len(check_results), cols=5)
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     tbl.style = "Table Grid"
-    fix_table_layout(tbl, [34, 92, 30, 30])
+    fix_table_layout(tbl, [34, 72, 22, 29, 29])
 
-    style_cell(tbl.cell(0, 0).merge(tbl.cell(1, 1)), "공 사 감 리 일 지", 16, True, WD_ALIGN_PARAGRAPH.CENTER)
-    style_cell(tbl.cell(0, 2), "건축사보", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(0, 3), "총괄감리책임자", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(1, 2), f"{inspector}\n(서명 또는 인)", 8.5, False, WD_ALIGN_PARAGRAPH.CENTER, img_path=si_path)
-    style_cell(tbl.cell(1, 3), f"{chief_supervisor}\n(서명 또는 인)", 8.5, False, WD_ALIGN_PARAGRAPH.CENTER, img_path=sc_path)
+    set_row_height(tbl.rows[0], 7)
+    set_row_height(tbl.rows[1], 14)
+    set_row_height(tbl.rows[2], 9)
+    set_row_height(tbl.rows[3], 9)
+    set_row_height(tbl.rows[4], 10)
 
-    style_cell(tbl.cell(2, 0), "공 사 명", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(2, 1).merge(tbl.cell(2, 3)), site_name, 9.5, True)
-    style_cell(tbl.cell(3, 0), "작 성 일", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(3, 1), date_str, 9)
-    style_cell(tbl.cell(3, 2), "날 씨", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(3, 3), weather, 9, False, WD_ALIGN_PARAGRAPH.CENTER)
+    style_cell(tbl.cell(0, 0).merge(tbl.cell(1, 2)), "공  사  감  리  일  지", 18, True, WD_ALIGN_PARAGRAPH.CENTER)
+    style_cell(tbl.cell(0, 3), "건축사보", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(0, 4), "총괄감리책임자", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(1, 3), f"{inspector}\n(서명 또는 인)", 8.5, False, WD_ALIGN_PARAGRAPH.CENTER, img_path=si_path)
+    style_cell(tbl.cell(1, 4), f"{chief_supervisor}\n(서명 또는 인)", 8.5, False, WD_ALIGN_PARAGRAPH.CENTER, img_path=sc_path)
+
+    style_cell(tbl.cell(2, 0), "공  사  명", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(2, 1).merge(tbl.cell(2, 4)), site_name, 9.5, True)
+
+    style_cell(tbl.cell(3, 0), "작  성  일", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(3, 1).merge(tbl.cell(3, 2)), date_str, 9)
+    style_cell(tbl.cell(3, 3), "날  씨", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(3, 4), weather, 9, False, WD_ALIGN_PARAGRAPH.CENTER)
+
     style_cell(tbl.cell(4, 0), f"공종 및 세부공정\n({location})", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(4, 1).merge(tbl.cell(4, 3)), "감리내용 (감리항목 및 확인결과)", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(4, 1).merge(tbl.cell(4, 4)), "감 리 내 용 (감리항목 및 확인결과)", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
 
     r = 5
     for proc, items in check_results.items():
         lines = [f"• {x['item']} ({x['res']})" for x in items if x['res'] != "해당없음"]
-        style_cell(tbl.cell(r, 0), proc, 9, True, WD_ALIGN_PARAGRAPH.CENTER)
-        style_cell(tbl.cell(r, 1).merge(tbl.cell(r, 3)), "\n".join(lines), 8)
+        set_row_height(tbl.rows[r], 45)
+        style_cell(tbl.cell(r, 0), proc, 9.5, True, WD_ALIGN_PARAGRAPH.CENTER)
+        style_cell(tbl.cell(r, 1).merge(tbl.cell(r, 4)), "\n".join(lines), 8.5)
         r += 1
 
-    style_cell(tbl.cell(r, 0), "특 기 사 항", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(r, 1).merge(tbl.cell(r, 3)), special_note, 8.5)
-    style_cell(tbl.cell(r + 1, 0), "지적사항 및\n처리결과", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(r + 1, 1).merge(tbl.cell(r + 1, 3)), issue_note, 8.5)
+    set_row_height(tbl.rows[r], 22)
+    style_cell(tbl.cell(r, 0), "특 기 사 항", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(r, 1).merge(tbl.cell(r, 4)), special_note, 8.5)
+
+    set_row_height(tbl.rows[r + 1], 24)
+    style_cell(tbl.cell(r + 1, 0), "지적사항 및\n처리결과", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(r + 1, 1).merge(tbl.cell(r + 1, 4)), issue_note if issue_note.strip() else "\n\n", 8.5)
 
     p_g = doc.add_paragraph(
         "작성방법\n"
@@ -194,8 +241,8 @@ def build_diary(tmpdir, date_str, si_path, sc_path):
         "4. 특기사항은 특별히 명기되어 있지 아니한 내용의 발생·조치사항 등을 기재합니다.\n"
         "5. 지적사항 및 처리결과는 재시공 및 공사중지 등 구두 또는 서면에 의한 지시내용과 처리결과를 기재합니다."
     )
-    p_g.paragraph_format.space_before = Pt(3)
-    p_g.paragraph_format.line_spacing = 1.05
+    p_g.paragraph_format.space_before = Pt(4)
+    p_g.paragraph_format.line_spacing = 1.08
     p_g.runs[0].font.size = Pt(7.5)
 
     out = os.path.join(tmpdir, "diary.docx")
@@ -205,40 +252,50 @@ def build_diary(tmpdir, date_str, si_path, sc_path):
 def build_chk(tmpdir, idx, proc, items, short_date):
     doc = make_doc()
     p0 = doc.add_paragraph(f"■ 건축공사 감리세부기준 [별표 1] ({gubun})")
-    p0.paragraph_format.space_after = Pt(2)
+    p0.paragraph_format.space_after = Pt(3)
     p0.runs[0].font.size = Pt(8.5)
 
-    tbl = doc.add_table(rows=5 + len(items), cols=5)
+    tbl = doc.add_table(rows=6 + len(items), cols=5)
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     tbl.style = "Table Grid"
     fix_table_layout(tbl, [24, 98, 16, 18, 30])
 
-    style_cell(tbl.cell(0, 0).merge(tbl.cell(0, 3)), "공 종 별  감 리  체 크 리 스 트", 14, True, WD_ALIGN_PARAGRAPH.CENTER)
-    style_cell(tbl.cell(0, 4), "문서번호 :\n", 8)
-    style_cell(tbl.cell(1, 0), "공 종", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(1, 1), proc, 9, True)
-    style_cell(tbl.cell(1, 2).merge(tbl.cell(1, 3)), "부위/위치", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(1, 4), location, 8.5)
-    style_cell(tbl.cell(2, 0), "구 분", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(2, 1), "검 사 항 목", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(2, 2), "적합", 8, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(2, 3), "부적합", 8, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(2, 4), "조치사항", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    set_row_height(tbl.rows[0], 11)
+    set_row_height(tbl.rows[1], 9)
+    set_row_height(tbl.rows[2], 6)
+    set_row_height(tbl.rows[3], 6)
 
-    for i, x in enumerate(items, start=3):
+    style_cell(tbl.cell(0, 0).merge(tbl.cell(0, 3)), "공 종 별  감 리  체 크 리 스 트", 15, True, WD_ALIGN_PARAGRAPH.CENTER)
+    style_cell(tbl.cell(0, 4), "문서번호 :\n", 8)
+
+    style_cell(tbl.cell(1, 0), "공   종", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(1, 1), proc, 9.5, True)
+    style_cell(tbl.cell(1, 2).merge(tbl.cell(1, 3)), "부위/위치", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(1, 4), location, 8.5, False, WD_ALIGN_PARAGRAPH.CENTER)
+
+    style_cell(tbl.cell(2, 0).merge(tbl.cell(3, 0)), "구  분", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(2, 1).merge(tbl.cell(3, 1)), "검  사  항  목", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(2, 2).merge(tbl.cell(2, 3)), "검사결과", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(3, 2), "적합", 8, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(3, 3), "부적합", 8, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(2, 4).merge(tbl.cell(3, 4)), "조치사항", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+
+    for i, x in enumerate(items, start=4):
         style_cell(tbl.cell(i, 0), x["cat"], 8, False, WD_ALIGN_PARAGRAPH.CENTER)
         style_cell(tbl.cell(i, 1), x["item"], 8.5)
-        style_cell(tbl.cell(i, 2), "✓" if x["res"] == "적합" else "", 9, True, WD_ALIGN_PARAGRAPH.CENTER)
-        style_cell(tbl.cell(i, 3), "✓" if x["res"] == "부적합" else "", 9, True, WD_ALIGN_PARAGRAPH.CENTER)
+        style_cell(tbl.cell(i, 2), "✓" if x["res"] == "적합" else "", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER)
+        style_cell(tbl.cell(i, 3), "✓" if x["res"] == "부적합" else "", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER)
         style_cell(tbl.cell(i, 4), "", 8)
 
-    r = 3 + len(items)
-    style_cell(tbl.cell(r, 0), "시공자점검일", 8, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(r, 1), short_date, 8.5, False, WD_ALIGN_PARAGRAPH.CENTER)
-    style_cell(tbl.cell(r, 2).merge(tbl.cell(r, 4)), f"총괄 시공 책임자 : {contractor} (서명 또는 인)", 8.5)
-    style_cell(tbl.cell(r + 1, 0), "감리자점검일", 8, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(r + 1, 1), short_date, 8.5, False, WD_ALIGN_PARAGRAPH.CENTER)
-    style_cell(tbl.cell(r + 1, 2).merge(tbl.cell(r + 1, 4)), f"건축사보(감리원) : {inspector} (서명 또는 인)", 8.5)
+    r = 4 + len(items)
+    set_row_height(tbl.rows[r], 9)
+    set_row_height(tbl.rows[r + 1], 9)
+    style_cell(tbl.cell(r, 0), "시공자점검일", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(r, 1), short_date, 9, False, WD_ALIGN_PARAGRAPH.CENTER)
+    style_cell(tbl.cell(r, 2).merge(tbl.cell(r, 4)), f"총괄 시공 책임자 : {contractor}  (서명 또는 인)", 9)
+    style_cell(tbl.cell(r + 1, 0), "감리자점검일", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
+    style_cell(tbl.cell(r + 1, 1), short_date, 9, False, WD_ALIGN_PARAGRAPH.CENTER)
+    style_cell(tbl.cell(r + 1, 2).merge(tbl.cell(r + 1, 4)), f"건축사보(감리원) : {inspector}  (서명 또는 인)", 9)
 
     out = os.path.join(tmpdir, f"chk_{idx}.docx")
     doc.save(out)
@@ -260,11 +317,10 @@ def build_photos(p_list, tmpdir):
         row = tbl.rows[i // 2].cells
         for j in range(2):
             if i + j < len(p_list):
-                raw_bytes, cap_txt = p_list[i + j]
-                img = ImageOps.exif_transpose(Image.open(io.BytesIO(raw_bytes))).convert("RGB")
-                img.thumbnail((1000, 1000))
+                clean_bytes, cap_txt = p_list[i + j]
                 pp = os.path.join(tmpdir, f"clean_p_{i+j}.jpg")
-                img.save(pp, format="JPEG", quality=85)
+                with open(pp, "wb") as f_out:
+                    f_out.write(clean_bytes)
 
                 set_cell_margins(row[j], 45, 45, 45, 45)
                 p_img = row[j].paragraphs[0]
