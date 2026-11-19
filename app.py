@@ -1,13 +1,16 @@
 import streamlit as st
 import json, os, subprocess, tempfile
 from datetime import date
-from docxtpl import DocxTemplate, InlineImage
-from docx.shared import Mm
 from docx import Document
+from docx.shared import Mm, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
+from docx.oxml import OxmlElement, parse_xml
+from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v2.0)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v2.1)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
@@ -59,7 +62,7 @@ st.subheader("3. 특기사항 및 지적사항")
 special_note = st.text_area("특기사항", value="- 해당공정 인부 안전관리 철저 주문\n- 용접공정이나 기타 인화물질자재 사용시 화재 안전기준 철저 주문")
 issue_note = st.text_area("지적사항 및 처리결과", value="")
 
-# 4. 현장 사진 업로드 (사진대지 자동 생성)
+# 4. 현장 사진 업로드
 st.subheader("4. 📸 현장 사진 업로드 (사진대지 자동 병합)")
 photos = st.file_uploader("현장 사진 선택 (갤러리에서 여러 장 선택 가능)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 if photos:
@@ -71,94 +74,145 @@ s1, s2 = st.columns(2)
 stamp_insp = s1.file_uploader("건축사보(감리원) 도장/서명", type=["png", "jpg", "jpeg"])
 stamp_chief = s2.file_uploader("총괄감리책임자 도장/서명", type=["png", "jpg", "jpeg"])
 
-def build_photo_docx(photo_files, tmpdir):
+# --- 워드 문서 생성 유틸리티 ---
+def set_cell_bg(cell, hex_color):
+    shading = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{hex_color}"/>')
+    cell._tc.get_or_add_tcPr().append(shading)
+
+def set_cell_margins(cell, top=35, bottom=35, left=75, right=75):
+    tcPr = cell._tc.get_or_add_tcPr()
+    tcMar = OxmlElement('w:tcMar')
+    for m, val in [('top', top), ('bottom', bottom), ('left', left), ('right', right)]:
+        node = OxmlElement(f'w:{m}')
+        node.set(qn('w:w'), str(val))
+        node.set(qn('w:type'), 'dxa')
+        tcMar.append(node)
+    tcPr.append(tcMar)
+
+def style_cell(cell, text="", size=9, bold=False, align=WD_ALIGN_PARAGRAPH.LEFT, bg=None, img_path=None, img_w=12):
+    cell.text = ""
+    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    set_cell_margins(cell)
+    if bg:
+        set_cell_bg(cell, bg)
+    p = cell.paragraphs[0]
+    p.alignment = align
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(0)
+    p.paragraph_format.line_spacing = 1.12
+    if text:
+        run = p.add_run(text)
+        run.font.name = "NanumGothic"
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), "NanumGothic")
+        run.font.size = Pt(size)
+        run.bold = bold
+    if img_path and os.path.exists(img_path):
+        run_img = p.add_run()
+        run_img.add_picture(img_path, width=Mm(img_w))
+
+def build_diary_docx(tmpdir, date_str, si_path, sc_path):
     doc = Document()
     for sec in doc.sections:
-        sec.top_margin = Mm(12)
-        sec.bottom_margin = Mm(12)
+        sec.top_margin = Mm(10)
+        sec.bottom_margin = Mm(10)
         sec.left_margin = Mm(12)
         sec.right_margin = Mm(12)
-    doc.add_heading("현장 감리 사진대지", level=1)
-    table = doc.add_table(rows=0, cols=2)
-    table.style = "Table Grid"
-    for i in range(0, len(photo_files), 2):
-        row = table.add_row().cells
-        for j in range(2):
-            if i + j < len(photo_files):
-                p_file = photo_files[i + j]
-                p_path = os.path.join(tmpdir, f"photo_{i+j}_{p_file.name}")
-                with open(p_path, "wb") as pf:
-                    pf.write(p_file.getbuffer())
-                run = row[j].paragraphs[0].add_run()
-                run.add_picture(p_path, width=Mm(78))
-                row[j].add_paragraph(f"사진 {i+j+1}. {p_file.name}")
-    out_docx = os.path.join(tmpdir, "photos.docx")
-    doc.save(out_docx)
-    return out_docx
 
-if st.button("📄 통합 감리일지 PDF 생성", type="primary", use_container_width=True):
-    if not selected_procs:
-        st.warning("최소 1개 이상의 공종을 선택해 주세요.")
-    else:
-        with st.spinner("PDF 문서를 생성 중입니다..."):
-            with tempfile.TemporaryDirectory() as tmpdir:
-                weekdays = ["월", "화", "수", "목", "금", "토", "일"]
-                date_str = f"{work_date.year}년 {work_date.month:02d}월 {work_date.day:02d}일 ({weekdays[work_date.weekday()]}요일)"
-                
-                diary_items = []
-                for proc, items in check_results.items():
-                    lines = [f"• {x['item']} ({x['res']})" for x in items if x['res'] != "해당없음"]
-                    diary_items.append({"proc": proc, "detail": "\n".join(lines)})
+    p_top = doc.add_paragraph("■ 건축공사 감리세부기준 [별지 제2호서식] <개정 2017. 2. 4.>")
+    p_top.paragraph_format.space_after = Pt(2)
+    p_top.runs[0].font.size = Pt(8)
 
-                tpl_diary = DocxTemplate("template_diary.docx")
-                ctx_diary = {
-                    "site_name": site_name, "date_str": date_str, "weather": weather,
-                    "location": location, "inspector": inspector, "chief_supervisor": chief_supervisor,
-                    "special_note": special_note, "issue_note": issue_note, "items": diary_items,
-                    "stamp_insp": "", "stamp_chief": ""
-                }
-                if stamp_insp:
-                    p_si = os.path.join(tmpdir, "si.png")
-                    with open(p_si, "wb") as f_si: f_si.write(stamp_insp.getbuffer())
-                    ctx_diary["stamp_insp"] = InlineImage(tpl_diary, p_si, width=Mm(12))
-                if stamp_chief:
-                    p_sc = os.path.join(tmpdir, "sc.png")
-                    with open(p_sc, "wb") as f_sc: f_sc.write(stamp_chief.getbuffer())
-                    ctx_diary["stamp_chief"] = InlineImage(tpl_diary, p_sc, width=Mm(12))
+    tbl = doc.add_table(rows=7 + len(check_results), cols=4)
+    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    tbl.style = "Table Grid"
+    widths = [Mm(32), Mm(94), Mm(30), Mm(30)]
+    for row in tbl.rows:
+        for idx, w in enumerate(widths):
+            row.cells[idx].width = w
 
-                diary_docx = os.path.join(tmpdir, "diary.docx")
-                tpl_diary.render(ctx_diary)
-                tpl_diary.save(diary_docx)
+    c_title = tbl.cell(0, 0).merge(tbl.cell(1, 1))
+    style_cell(c_title, "공 사 감 리 일 지", size=16, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
+    style_cell(tbl.cell(0, 2), "건축사보", size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+    style_cell(tbl.cell(0, 3), "총괄감리책임자", size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+    style_cell(tbl.cell(1, 2), f"{inspector}\n(서명 또는 인)", size=8.5, align=WD_ALIGN_PARAGRAPH.CENTER, img_path=si_path, img_w=11)
+    style_cell(tbl.cell(1, 3), f"{chief_supervisor}\n(서명 또는 인)", size=8.5, align=WD_ALIGN_PARAGRAPH.CENTER, img_path=sc_path, img_w=11)
 
-                docx_list = [diary_docx]
-                for idx, (proc, items) in enumerate(check_results.items()):
-                    tpl_chk = DocxTemplate("template_checklist.docx")
-                    chk_rows = [{
-                        "cat": x["cat"], "item": x["item"],
-                        "ok": "✓" if x["res"] == "적합" else "",
-                        "no": "✓" if x["res"] == "부적합" else "",
-                        "action": ""
-                    } for x in items]
-                    ctx_chk = {
-                        "gubun": gubun, "proc": proc, "location": location,
-                        "date_str": f"{work_date.year}년 {work_date.month:02d}월 {work_date.day:02d}일",
-                        "contractor": contractor, "inspector": inspector, "rows": chk_rows
-                    }
-                    c_docx = os.path.join(tmpdir, f"chk_{idx}.docx")
-                    tpl_chk.render(ctx_chk)
-                    tpl_chk.save(c_docx)
-                    docx_list.append(c_docx)
+    style_cell(tbl.cell(2, 0), "공 사 명", size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+    style_cell(tbl.cell(2, 1).merge(tbl.cell(2, 3)), site_name, size=9.5, bold=True)
 
-                if photos:
-                    docx_list.append(build_photo_docx(photos, tmpdir))
+    style_cell(tbl.cell(3, 0), "작 성 일", size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+    style_cell(tbl.cell(3, 1), date_str, size=9)
+    style_cell(tbl.cell(3, 2), "날 씨", size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+    style_cell(tbl.cell(3, 3), weather, size=9, align=WD_ALIGN_PARAGRAPH.CENTER)
 
-                writer = PdfWriter()
-                for d_path in docx_list:
-                    subprocess.run(["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", tmpdir, d_path], check=True)
-                    pdf_path = os.path.splitext(d_path)[0] + ".pdf"
-                    writer.append(pdf_path)
+    style_cell(tbl.cell(4, 0), f"공종 및 세부공정\n({location})", size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+    style_cell(tbl.cell(4, 1).merge(tbl.cell(4, 3)), "감리내용 (감리항목 및 확인결과)", size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
 
-                final_pdf = os.path.join(tmpdir, "final.pdf")
-                writer.write(final_pdf)
-                with open(final_pdf, "rb") as fp:
-                    st.download_button("⬇️ 완성된 통합 PDF 다운로드", fp.read(), file_name=f"[별지2]공사감리일지({work_date}).pdf", mime="application/pdf", use_container_width=True)
+    r_idx = 5
+    for proc, items in check_results.items():
+        lines = [f"• {x['item']} ({x['res']})" for x in items if x['res'] != "해당없음"]
+        style_cell(tbl.cell(r_idx, 0), proc, size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
+        style_cell(tbl.cell(r_idx, 1).merge(tbl.cell(r_idx, 3)), "\n".join(lines), size=8.5)
+        r_idx += 1
+
+    style_cell(tbl.cell(r_idx, 0), "특 기 사 항", size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+    style_cell(tbl.cell(r_idx, 1).merge(tbl.cell(r_idx, 3)), special_note, size=8.5)
+    r_idx += 1
+
+    style_cell(tbl.cell(r_idx, 0), "지적사항 및\n처리결과", size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+    style_cell(tbl.cell(r_idx, 1).merge(tbl.cell(r_idx, 3)), issue_note, size=8.5)
+
+    p_guide = doc.add_paragraph(
+        "작성방법\n"
+        "1. 공종에는 주요공종 및 단위공종 그리고 해당 층수를 기재합니다.\n"
+        "2. 감리항목은 공종별 감리 체크리스트를 기반으로 감리항목을 기재합니다.\n"
+        "3. 감리내용에는 각 감리항목에 대하여 육안검사·입회·시험 등을 통한 감리내용을 구체적으로 기재하고, 그 결과와 업무수행 근거자료를 상세히 기재합니다.\n"
+        "4. 특기사항은 특별히 명기되어 있지 아니한 내용의 발생·조치사항 등을 기재합니다.\n"
+        "5. 지적사항 및 처리결과는 재시공 및 공사중지 등 구두 또는 서면에 의한 지시내용과 처리결과를 기재합니다."
+    )
+    p_guide.paragraph_format.space_before = Pt(3)
+    p_guide.paragraph_format.line_spacing = 1.05
+    for r in p_guide.runs:
+        r.font.size = Pt(7.5)
+
+    out_path = os.path.join(tmpdir, "diary.docx")
+    doc.save(out_path)
+    return out_path
+
+def build_checklist_docx(tmpdir, idx, proc, items, short_date):
+    doc = Document()
+    for sec in doc.sections:
+        sec.top_margin = Mm(10)
+        sec.bottom_margin = Mm(10)
+        sec.left_margin = Mm(12)
+        sec.right_margin = Mm(12)
+
+    p_top = doc.add_paragraph(f"■ 건축공사 감리세부기준 [별표 1] ({gubun})")
+    p_top.paragraph_format.space_after = Pt(2)
+    p_top.runs[0].font.size = Pt(8.5)
+
+    tbl = doc.add_table(rows=5 + len(items), cols=5)
+    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    tbl.style = "Table Grid"
+    w2 = [Mm(24), Mm(96), Mm(16), Mm(18), Mm(32)]
+    for row in tbl.rows:
+        for i, w in enumerate(w2):
+            row.cells[i].width = w
+
+    style_cell(tbl.cell(0, 0).merge(tbl.cell(0, 3)), "공 종 별  감 리  체 크 리 스 트", size=14, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
+    style_cell(tbl.cell(0, 4), "문서번호 :\n", size=8)
+
+    style_cell(tbl.cell(1, 0), "공 종", size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+    style_cell(tbl.cell(1, 1), proc, size=9, bold=True)
+    style_cell(tbl.cell(1, 2).merge(tbl.cell(1, 3)), "부위/위치", size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+    style_cell(tbl.cell(1, 4), location, size=9)
+
+    style_cell(tbl.cell(2, 0), "구 분", size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+    style_cell(tbl.cell(2, 1), "검 사 항 목", size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+    style_cell(tbl.cell(2, 2), "적합", size=8.5, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+    style_cell(tbl.cell(2, 3), "부적합", size=8.5, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+    style_cell(tbl.cell(2, 4), "조치사항", size=9, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="F2F2F2")
+
+    r_idx = 3
+    for x in items:
+        style_cell(tbl
