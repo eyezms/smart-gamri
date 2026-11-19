@@ -11,7 +11,7 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v3.0)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v3.1)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
@@ -19,62 +19,41 @@ with open("checklist_db.json", "r", encoding="utf-8") as f:
 def clean_txt(t):
     return re.sub(r'^[☑☐■□✓✔•\-\s]+', '', str(t)).strip()
 
-def get_proc_items(proc_data):
-    """checklist_db.json의 어떤 키/값 형태든 기본업무와 기본외업무를 정확히 분리"""
-    result = []
-    # 케이스 1: {"기본업무": [...], "기본업무 외": [...]} 형태인 경우
-    if isinstance(proc_data, dict):
-        for cat_key, items_list in proc_data.items():
-            if isinstance(items_list, list):
-                for raw in items_list:
-                    _, txt = parse_single(raw, default_cat=str(cat_key))
-                    result.append((str(cat_key), txt))
-        return result
-
-    # 케이스 2: [{"cat": "기본업무 외", "item": "..."}, ...] 리스트 형태인 경우
-    if isinstance(proc_data, list):
-        for raw in proc_data:
-            cat, txt = parse_single(raw, default_cat="기본업무")
-            result.append((cat, txt))
-    return result
-
 def parse_single(raw, default_cat="기본업무"):
     if isinstance(raw, str):
-        m = re.match(r'^\[?(기본\s*업무\s*외\vert{}기본\s*외\s*업무\vert{}기본\s*업무\vert{}기본\s*외)\]?\s*(.+)', raw)
-        if m:
-            return m.group(1).strip(), clean_txt(m.group(2))
-        return default_cat, clean_txt(raw)
-
+        m = re.match(r'^\[?(기본\s*업무\s*외|기본\s*외\s*업무|기본\s*업무|기본\s*외)\]?\s*(.+)', raw)
+        return (m.group(1).strip(), clean_txt(m.group(2))) if m else (default_cat, clean_txt(raw))
     if isinstance(raw, dict):
-        cat = None
-        text = None
-        # 1차: 명시적인 구분 키('cat', 'category', '구분', 'type' 등) 우선 탐색
+        cat, text = None, None
         for k, v in raw.items():
-            k_low = str(k).lower()
-            v_str = str(v).strip()
-            if k_low in ["cat", "category", "구분", "type", "gubun", "div", "section"]:
-                cat = v_str
-            elif k_low in ["item", "text", "content", "검사항목", "항목", "title", "desc", "question"]:
-                text = v_str
-
-        # 2차: 키 이름이 다른 경우 값의 길이나 '업무'/'외' 포함 여부로 자동 판별
+            kl, vs = str(k).lower(), str(v).strip()
+            if kl in ["cat", "category", "구분", "type", "gubun", "div", "section"]:
+                cat = vs
+            elif kl in ["item", "text", "content", "검사항목", "항목", "title", "desc", "question"]:
+                text = vs
         if cat is None or text is None:
-            str_vals = [str(v).strip() for v in raw.values() if v is not None and str(v).strip()]
-            for sv in str_vals:
-                if cat is None and len(sv) <= 15 and ("업무" in sv or "기본" in sv or "외" in sv):
+            for sv in [str(v).strip() for v in raw.values() if v is not None and str(v).strip()]:
+                if cat is None and len(sv) <= 15 and any(w in sv for w in ["업무", "기본", "외"]):
                     cat = sv
                 elif text is None and sv != cat:
                     text = sv
-
         return (cat or default_cat), clean_txt(text or "")
     return default_cat, clean_txt(raw)
 
-def is_extra_task(cat_str):
-    """구분 텍스트가 기본외업무('기본업무 외', '기본외업무', '기본 외' 등)인지 판별"""
-    c = str(cat_str).replace(" ", "")
-    return ("외" in c) or ("추가" in c)
+def get_proc_items(proc_data):
+    res = []
+    if isinstance(proc_data, dict):
+        for ck, ilist in proc_data.items():
+            if isinstance(ilist, list):
+                res.extend((str(ck), parse_single(r, str(ck))[1]) for r in ilist)
+    elif isinstance(proc_data, list):
+        res.extend(parse_single(r, "기본업무") for r in proc_data)
+    return res
 
-# 1. 감리 구분 및 공사 개요 (담당자 모두 공란)
+def is_extra(c):
+    s = str(c).replace(" ", "")
+    return ("외" in s) or ("추가" in s)
+
 st.subheader("1. 감리 구분 및 공사 개요")
 gubun = st.radio("감리업무 구분", ["비상주 감리", "책임상주 감리"], horizontal=True)
 site_name = st.text_input("공사명", value="서탄산업단지 (주)노바테크놀러지스 신축공사")
@@ -89,251 +68,192 @@ inspector = c4.text_input("건축사보(감리원)", value="", placeholder="성�
 chief_supervisor = c5.text_input("총괄감리책임자", value="", placeholder="성명 입력")
 contractor = c6.text_input("총괄 시공 책임자", value="", placeholder="성명 입력")
 
-# 2. 공종별 체크리스트 (전체 / 기본업무 / 기본외 업무 필터)
 st.subheader(f"2. [{gubun}] 공종별 체크리스트")
 task_filter = st.radio("업무 구분 선택", ["전체", "기본업무", "기본외 업무"], horizontal=True)
 selected_procs = st.multiselect("금일 감리 공종 선택", list(DB[gubun].keys()))
 
 check_results = {}
 for proc in selected_procs:
-    parsed_list = get_proc_items(DB[gubun][proc])
-    basic_cnt = sum(1 for c, _ in parsed_list if not is_extra_task(c))
-    extra_cnt = sum(1 for c, _ in parsed_list if is_extra_task(c))
-
-    filtered_list = []
-    for cat_str, item_str in parsed_list:
-        extra = is_extra_task(cat_str)
-        if task_filter == "전체":
-            filtered_list.append((cat_str, item_str))
-        elif task_filter == "기본업무" and not extra:
-            filtered_list.append((cat_str, item_str))
-        elif task_filter == "기본외 업무" and extra:
-            filtered_list.append((cat_str, item_str))
-
-    with st.expander(f"📋 {proc} (전체 {len(parsed_list)}건 = 기본 {basic_cnt} / 기본외 {extra_cnt}) → 현재 표시: {len(filtered_list)}건", expanded=True):
+    plist = get_proc_items(DB[gubun][proc])
+    b_cnt = sum(1 for c, _ in plist if not is_extra(c))
+    e_cnt = sum(1 for c, _ in plist if is_extra(c))
+    flist = [
+        (c, t) for c, t in plist
+        if task_filter == "전체" or (task_filter == "기본업무" and not is_extra(c)) or (task_filter == "기본외 업무" and is_extra(c))
+    ]
+    with st.expander(f"📋 {proc} (기본 {b_cnt} / 기본외 {e_cnt}) → 표시: {len(flist)}건", expanded=True):
         check_results[proc] = []
-        if not filtered_list:
-            st.info(f"해당 공종에는 '{task_filter}' 항목이 없습니다.")
-        for idx, (cat_str, item_str) in enumerate(filtered_list):
+        if not flist:
+            st.info(f"'{task_filter}' 항목이 없습니다.")
+        for idx, (c_str, i_str) in enumerate(flist):
             col_t, col_r = st.columns([3, 1])
-            badge = "🔵" if is_extra_task(cat_str) else "🟢"
-            col_t.write(f"{badge} **[{cat_str}]** {item_str}")
+            col_t.write(f"{'🔵' if is_extra(c_str) else '🟢'} **[{c_str}]** {i_str}")
             res = col_r.selectbox("결과", ["적합", "부적합", "해당없음"], key=f"{proc}_{task_filter}_{idx}", label_visibility="collapsed")
-            check_results[proc].append({"cat": cat_str, "item": item_str, "res": res})
+            check_results[proc].append({"cat": c_str, "item": i_str, "res": res})
 
-# 3. 특기사항 및 지적사항
 st.subheader("3. 특기사항 및 지적사항")
 special_note = st.text_area("특기사항", value="- 해당공정 인부 안전관리 철저 주문\n- 용접공정이나 기타 인화물질자재 사용시 화재 안전기준 철저 주문")
 issue_note = st.text_area("지적사항 및 처리결과", value="")
 
-# 4. 현장 사진 업로드
 st.subheader("4. 📸 현장 사진 업로드 (사진대지 자동 병합)")
 if "saved_photos" not in st.session_state:
     st.session_state["saved_photos"] = []
 
-uploaded_photos = st.file_uploader(
-    "현장 사진 선택 (갤러리/파일에서 여러 장 선택)",
-    accept_multiple_files=True,
-    key="photo_uploader"
-)
-if uploaded_photos:
-    new_list = []
-    for pf in uploaded_photos:
+up_photos = st.file_uploader("현장 사진 선택 (여러 장 가능)", accept_multiple_files=True, key="photo_uploader")
+if up_photos:
+    nlist = []
+    for pf in up_photos:
         try:
-            raw_b = pf.getvalue()
-            img = ImageOps.exif_transpose(Image.open(io.BytesIO(raw_b))).convert("RGB")
+            img = ImageOps.exif_transpose(Image.open(io.BytesIO(pf.getvalue()))).convert("RGB")
             img.thumbnail((1000, 1000))
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=85)
-            new_list.append((pf.name, buf.getvalue()))
+            nlist.append((pf.name, buf.getvalue()))
         except Exception as e:
-            st.error(f"이미지 처리 오류 ({pf.name}): {e}")
-    if new_list:
-        st.session_state["saved_photos"] = new_list
+            st.error(f"이미지 오류 ({pf.name}): {e}")
+    if nlist:
+        st.session_state["saved_photos"] = nlist
 
 photo_data_list = []
 if st.session_state["saved_photos"]:
-    col_info, col_clr = st.columns([3, 1])
-    col_info.success(f"✅ 총 {len(st.session_state['saved_photos'])}장 사진 준비 완료 (PDF 맨 뒤에 병합됩니다)")
-    if col_clr.button("사진 초기화"):
+    ci, cc = st.columns([3, 1])
+    ci.success(f"✅ 총 {len(st.session_state['saved_photos'])}장 준비 완료")
+    if cc.button("사진 초기화"):
         st.session_state["saved_photos"] = []
         st.rerun()
-
     cols = st.columns(2)
-    for i, (fname, clean_bytes) in enumerate(st.session_state["saved_photos"]):
+    for i, (fn, cb) in enumerate(st.session_state["saved_photos"]):
         with cols[i % 2]:
-            st.image(clean_bytes, caption=f"사진 {i+1}", use_container_width=True)
+            st.image(cb, caption=f"사진 {i+1}", use_container_width=True)
             cap = st.text_input(f"사진 {i+1} 설명", value=f"시공 현황 ({location})", key=f"cap_{i}")
-            photo_data_list.append((clean_bytes, cap))
+            photo_data_list.append((cb, cap))
 
-# 5. 결재 도장/서명 첨부
 st.subheader("5. ✍️ 결재 도장/서명 첨부")
 s1, s2 = st.columns(2)
 stamp_insp = s1.file_uploader("건축사보(감리원) 도장/서명", type=["png", "jpg", "jpeg"])
 stamp_chief = s2.file_uploader("총괄감리책임자 도장/서명", type=["png", "jpg", "jpeg"])
 
-# --- 원본 법정 서식 정밀 렌더링 유틸리티 ---
-def fix_table_layout(table, col_widths_mm):
-    table.autofit = False
-    tblPr = table._tbl.tblPr
-    tblLayout = OxmlElement('w:tblLayout')
-    tblLayout.set(qn('w:type'), 'fixed')
-    tblPr.append(tblLayout)
+def fix_table(tbl, widths):
+    tbl.autofit = False
+    tl = OxmlElement('w:tblLayout')
+    tl.set(qn('w:type'), 'fixed')
+    tbl._tbl.tblPr.append(tl)
+    tg = tbl._tbl.tblGrid
+    for ch in list(tg): tg.remove(ch)
+    for w in widths:
+        gc = OxmlElement('w:gridCol')
+        gc.set(qn('w:w'), str(int(w * 56.7)))
+        tg.append(gc)
+    for r in tbl.rows:
+        for i, w in enumerate(widths):
+            c = r.cells[i]
+            c.width = Mm(w)
+            tp = c._tc.get_or_add_tcPr()
+            for old in tp.findall(qn('w:tcW')): tp.remove(old)
+            tw = OxmlElement('w:tcW')
+            tw.set(qn('w:w'), str(int(w * 56.7)))
+            tw.set(qn('w:type'), 'dxa')
+            tp.append(tw)
 
-    tblGrid = table._tbl.tblGrid
-    for child in list(tblGrid):
-        tblGrid.remove(child)
-    for w_mm in col_widths_mm:
-        gridCol = OxmlElement('w:gridCol')
-        gridCol.set(qn('w:w'), str(int(w_mm * 56.7)))
-        tblGrid.append(gridCol)
+def set_h(row, h_mm):
+    th = OxmlElement('w:trHeight')
+    th.set(qn('w:val'), str(int(h_mm * 56.7)))
+    th.set(qn('w:hRule'), 'atLeast')
+    row._tr.get_or_add_trPr().append(th)
 
-    for row in table.rows:
-        for idx, w_mm in enumerate(col_widths_mm):
-            cell = row.cells[idx]
-            cell.width = Mm(w_mm)
-            tcPr = cell._tc.get_or_add_tcPr()
-            for old in tcPr.findall(qn('w:tcW')):
-                tcPr.remove(old)
-            tcW = OxmlElement('w:tcW')
-            tcW.set(qn('w:w'), str(int(w_mm * 56.7)))
-            tcW.set(qn('w:type'), 'dxa')
-            tcPr.append(tcW)
-
-def set_row_height(row, height_mm):
-    trPr = row._tr.get_or_add_trPr()
-    trHeight = OxmlElement('w:trHeight')
-    trHeight.set(qn('w:val'), str(int(height_mm * 56.7)))
-    trHeight.set(qn('w:hRule'), 'atLeast')
-    trPr.append(trHeight)
-
-def set_cell_margins(cell, top=45, bottom=45, left=70, right=70):
-    tcPr = cell._tc.get_or_add_tcPr()
-    tcMar = OxmlElement('w:tcMar')
-    for m, val in [('top', top), ('bottom', bottom), ('left', left), ('right', right)]:
-        node = OxmlElement(f'w:{m}')
-        node.set(qn('w:w'), str(val))
-        node.set(qn('w:type'), 'dxa')
-        tcMar.append(node)
-    tcPr.append(tcMar)
-
-def style_cell(cell, text="", size=9, bold=False, align=WD_ALIGN_PARAGRAPH.LEFT, bg=None, img_path=None):
+def style_cell(cell, txt="", sz=9, b=False, al=WD_ALIGN_PARAGRAPH.LEFT, bg=None, img=None):
     cell.text = ""
     cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-    set_cell_margins(cell)
-    if bg:
-        cell._tc.get_or_add_tcPr().append(parse_xml(f'<w:shd {nsdecls("w")} w:fill="{bg}"/>'))
+    tp = cell._tc.get_or_add_tcPr()
+    tm = OxmlElement('w:tcMar')
+    for m, v in [('top', 40), ('bottom', 40), ('left', 65), ('right', 65)]:
+        nd = OxmlElement(f'w:{m}')
+        nd.set(qn('w:w'), str(v))
+        nd.set(qn('w:type'), 'dxa')
+        tm.append(nd)
+    tp.append(tm)
+    if bg: tp.append(parse_xml(f'<w:shd {nsdecls("w")} w:fill="{bg}"/>'))
     p = cell.paragraphs[0]
-    p.alignment = align
-    p.paragraph_format.space_before = Pt(0)
-    p.paragraph_format.space_after = Pt(0)
+    p.alignment = al
+    p.paragraph_format.space_before = p.paragraph_format.space_after = Pt(0)
     p.paragraph_format.line_spacing = 1.12
-    if text:
-        run = p.add_run(text)
-        run.font.name = "NanumGothic"
-        run._element.rPr.rFonts.set(qn('w:eastAsia'), "NanumGothic")
-        run.font.size = Pt(size)
-        run.bold = bold
-    if img_path and os.path.exists(img_path):
-        p.add_run().add_picture(img_path, width=Mm(12))
+    if txt:
+        r = p.add_run(txt)
+        r.font.name = "NanumGothic"
+        r._element.rPr.rFonts.set(qn('w:eastAsia'), "NanumGothic")
+        r.font.size, r.bold = Pt(sz), b
+    if img and os.path.exists(img):
+        p.add_run().add_picture(img, width=Mm(12))
 
 def make_doc():
     d = Document()
     for s in d.sections:
         s.page_width, s.page_height = Mm(210), Mm(297)
-        s.top_margin, s.bottom_margin, s.left_margin, s.right_margin = Mm(10), Mm(10), Mm(12), Mm(12)
+        s.top_margin = s.bottom_margin = Mm(10)
+        s.left_margin = s.right_margin = Mm(12)
     return d
 
-def build_diary(tmpdir, date_str, si_path, sc_path):
+def build_diary(tmp, d_str, si, sc):
     doc = make_doc()
     p0 = doc.add_paragraph("■ 건축공사 감리세부기준 [별지 제2호서식] <개정 2017. 2. 4.>")
     p0.paragraph_format.space_after = Pt(3)
     p0.runs[0].font.size = Pt(8)
-
     tbl = doc.add_table(rows=7 + len(check_results), cols=5)
-    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-    tbl.style = "Table Grid"
-    fix_table_layout(tbl, [34, 72, 22, 29, 29])
-
-    set_row_height(tbl.rows[0], 7)
-    set_row_height(tbl.rows[1], 14)
-    set_row_height(tbl.rows[2], 9)
-    set_row_height(tbl.rows[3], 9)
-    set_row_height(tbl.rows[4], 10)
+    tbl.alignment, tbl.style = WD_TABLE_ALIGNMENT.CENTER, "Table Grid"
+    fix_table(tbl, [34, 72, 22, 29, 29])
+    for idx, h in enumerate([7, 14, 9, 9, 10]): set_h(tbl.rows[idx], h)
 
     style_cell(tbl.cell(0, 0).merge(tbl.cell(1, 2)), "공  사  감  리  일  지", 18, True, WD_ALIGN_PARAGRAPH.CENTER)
     style_cell(tbl.cell(0, 3), "건축사보", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(0, 4), "총괄감리책임자", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(1, 3), f"{inspector}\n(서명 또는 인)", 8.5, False, WD_ALIGN_PARAGRAPH.CENTER, img_path=si_path)
-    style_cell(tbl.cell(1, 4), f"{chief_supervisor}\n(서명 또는 인)", 8.5, False, WD_ALIGN_PARAGRAPH.CENTER, img_path=sc_path)
-
+    style_cell(tbl.cell(1, 3), f"{inspector}\n(서명 또는 인)", 8.5, False, WD_ALIGN_PARAGRAPH.CENTER, img=si)
+    style_cell(tbl.cell(1, 4), f"{chief_supervisor}\n(서명 또는 인)", 8.5, False, WD_ALIGN_PARAGRAPH.CENTER, img=sc)
     style_cell(tbl.cell(2, 0), "공  사  명", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(2, 1).merge(tbl.cell(2, 4)), site_name, 9.5, True)
-
     style_cell(tbl.cell(3, 0), "작  성  일", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(3, 1).merge(tbl.cell(3, 2)), date_str, 9)
+    style_cell(tbl.cell(3, 1).merge(tbl.cell(3, 2)), d_str, 9)
     style_cell(tbl.cell(3, 3), "날  씨", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(3, 4), weather, 9, False, WD_ALIGN_PARAGRAPH.CENTER)
-
     style_cell(tbl.cell(4, 0), f"공종 및 세부공정\n({location})", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(4, 1).merge(tbl.cell(4, 4)), "감 리 내 용 (감리항목 및 확인결과)", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
 
     r = 5
     for proc, items in check_results.items():
         lines = [f"• [{x['cat']}] {x['item']} ({x['res']})" for x in items if x['res'] != "해당없음"]
-        set_row_height(tbl.rows[r], 45)
+        set_h(tbl.rows[r], 45)
         style_cell(tbl.cell(r, 0), proc, 9.5, True, WD_ALIGN_PARAGRAPH.CENTER)
         style_cell(tbl.cell(r, 1).merge(tbl.cell(r, 4)), "\n".join(lines), 8.5)
         r += 1
-
-    set_row_height(tbl.rows[r], 22)
+    set_h(tbl.rows[r], 22)
     style_cell(tbl.cell(r, 0), "특 기 사 항", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(r, 1).merge(tbl.cell(r, 4)), special_note, 8.5)
-
-    set_row_height(tbl.rows[r + 1], 24)
+    set_h(tbl.rows[r + 1], 24)
     style_cell(tbl.cell(r + 1, 0), "지적사항 및\n처리결과", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(r + 1, 1).merge(tbl.cell(r + 1, 4)), issue_note if issue_note.strip() else "\n\n", 8.5)
 
-    p_g = doc.add_paragraph(
-        "작성방법\n"
-        "1. 공종에는 주요공종 및 단위공종 그리고 해당 층수를 기재합니다.\n"
-        "2. 감리항목은 공종별 감리 체크리스트를 기반으로 감리항목을 기재합니다.\n"
-        "3. 감리내용에는 각 감리항목에 대하여 육안검사·입회·시험 등을 통한 감리내용을 구체적으로 기재하고, 그 결과와 업무수행 근거자료를 상세히 기재합니다.\n"
-        "4. 특기사항은 특별히 명기되어 있지 아니한 내용의 발생·조치사항 등을 기재합니다.\n"
-        "5. 지적사항 및 처리결과는 재시공 및 공사중지 등 구두 또는 서면에 의한 지시내용과 처리결과를 기재합니다."
-    )
-    p_g.paragraph_format.space_before = Pt(4)
-    p_g.paragraph_format.line_spacing = 1.08
-    p_g.runs[0].font.size = Pt(7.5)
-
-    out = os.path.join(tmpdir, "diary.docx")
+    pg = doc.add_paragraph("작성방법: 1.주요/단위공종 및 층수 기재  2.체크리스트 기반 감리항목 기재  3.육안·입회·시험 결과 상세 기재  4.특기사항  5.지적사항 및 처리결과")
+    pg.paragraph_format.space_before = Pt(4)
+    pg.runs[0].font.size = Pt(7.5)
+    out = os.path.join(tmp, "diary.docx")
     doc.save(out)
     return out
 
-def build_chk(tmpdir, idx, proc, items, short_date):
+def build_chk(tmp, idx, proc, items, s_date):
     doc = make_doc()
     p0 = doc.add_paragraph(f"■ 건축공사 감리세부기준 [별표 1] ({gubun} - {task_filter})")
     p0.paragraph_format.space_after = Pt(3)
     p0.runs[0].font.size = Pt(8.5)
-
     tbl = doc.add_table(rows=6 + len(items), cols=5)
-    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-    tbl.style = "Table Grid"
-    fix_table_layout(tbl, [24, 98, 16, 18, 30])
-
-    set_row_height(tbl.rows[0], 11)
-    set_row_height(tbl.rows[1], 9)
-    set_row_height(tbl.rows[2], 6)
-    set_row_height(tbl.rows[3], 6)
+    tbl.alignment, tbl.style = WD_TABLE_ALIGNMENT.CENTER, "Table Grid"
+    fix_table(tbl, [24, 98, 16, 18, 30])
+    for i, h in enumerate([11, 9, 6, 6]): set_h(tbl.rows[i], h)
 
     style_cell(tbl.cell(0, 0).merge(tbl.cell(0, 3)), "공 종 별  감 리  체 크 리 스 트", 15, True, WD_ALIGN_PARAGRAPH.CENTER)
     style_cell(tbl.cell(0, 4), "문서번호 :\n", 8)
-
     style_cell(tbl.cell(1, 0), "공   종", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(1, 1), proc, 9.5, True)
     style_cell(tbl.cell(1, 2).merge(tbl.cell(1, 3)), "부위/위치", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(1, 4), location, 8.5, False, WD_ALIGN_PARAGRAPH.CENTER)
-
     style_cell(tbl.cell(2, 0).merge(tbl.cell(3, 0)), "구  분", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(2, 1).merge(tbl.cell(3, 1)), "검  사  항  목", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(2, 2).merge(tbl.cell(2, 3)), "검사결과", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
@@ -349,34 +269,67 @@ def build_chk(tmpdir, idx, proc, items, short_date):
         style_cell(tbl.cell(i, 4), "", 8)
 
     r = 4 + len(items)
-    set_row_height(tbl.rows[r], 9)
-    set_row_height(tbl.rows[r + 1], 9)
+    set_h(tbl.rows[r], 9); set_h(tbl.rows[r + 1], 9)
     style_cell(tbl.cell(r, 0), "시공자점검일", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(r, 1), short_date, 9, False, WD_ALIGN_PARAGRAPH.CENTER)
+    style_cell(tbl.cell(r, 1), s_date, 9, False, WD_ALIGN_PARAGRAPH.CENTER)
     style_cell(tbl.cell(r, 2).merge(tbl.cell(r, 4)), f"총괄 시공 책임자 : {contractor}  (서명 또는 인)", 9)
     style_cell(tbl.cell(r + 1, 0), "감리자점검일", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(r + 1, 1), short_date, 9, False, WD_ALIGN_PARAGRAPH.CENTER)
+    style_cell(tbl.cell(r + 1, 1), s_date, 9, False, WD_ALIGN_PARAGRAPH.CENTER)
     style_cell(tbl.cell(r + 1, 2).merge(tbl.cell(r + 1, 4)), f"건축사보(감리원) : {inspector}  (서명 또는 인)", 9)
-
-    out = os.path.join(tmpdir, f"chk_{idx}.docx")
+    out = os.path.join(tmp, f"chk_{idx}.docx")
     doc.save(out)
     return out
 
-def build_photos(p_list, tmpdir):
+def build_photos(plist, tmp):
     doc = make_doc()
-    p_title = doc.add_paragraph("■ 현장 감리 사진대지")
-    p_title.runs[0].font.size = Pt(12)
-    p_title.runs[0].bold = True
-
-    num_rows = (len(p_list) + 1) // 2
-    tbl = doc.add_table(rows=num_rows, cols=2)
-    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-    tbl.style = "Table Grid"
-    fix_table_layout(tbl, [93, 93])
-
-    for i in range(0, len(p_list), 2):
+    pt = doc.add_paragraph("■ 현장 감리 사진대지")
+    pt.runs[0].font.size, pt.runs[0].bold = Pt(12), True
+    tbl = doc.add_table(rows=(len(plist) + 1) // 2, cols=2)
+    tbl.alignment, tbl.style = WD_TABLE_ALIGNMENT.CENTER, "Table Grid"
+    fix_table(tbl, [93, 93])
+    for i in range(0, len(plist), 2):
         row = tbl.rows[i // 2].cells
         for j in range(2):
-            if i + j < len(p_list):
-                clean_bytes, cap_txt = p_list[i + j]
-                pp = os.path.join(tmpdir,
+            if i + j < len(plist):
+                cb, cap = plist[i + j]
+                pp = os.path.join(tmp, f"p_{i+j}.jpg")
+                with open(pp, "wb") as fo: fo.write(cb)
+                pi = row[j].paragraphs[0]
+                pi.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                pi.add_run().add_picture(pp, width=Mm(82))
+                pc = row[j].add_paragraph(f"[사진 {i+j+1}] {cap}")
+                pc.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                pc.runs[0].font.size = Pt(8.5)
+    out = os.path.join(tmp, "photos.docx")
+    doc.save(out)
+    return out
+
+if st.button("📄 통합 감리일지 PDF 생성", type="primary", use_container_width=True):
+    if not selected_procs:
+        st.warning("최소 1개 이상의 공종을 선택해 주세요.")
+    else:
+        with st.spinner("통합 PDF 생성 중..."):
+            with tempfile.TemporaryDirectory() as tmp:
+                wk = ["월", "화", "수", "목", "금", "토", "일"][work_date.weekday()]
+                d_str = f"{work_date.year}년 {work_date.month:02d}월 {work_date.day:02d}일 ({wk}요일)"
+                s_date = f"{work_date.year}년 {work_date.month:02d}월 {work_date.day:02d}일"
+                si, sc = None, None
+                if stamp_insp:
+                    si = os.path.join(tmp, "si.png")
+                    Image.open(io.BytesIO(stamp_insp.getvalue())).save(si)
+                if stamp_chief:
+                    sc = os.path.join(tmp, "sc.png")
+                    Image.open(io.BytesIO(stamp_chief.getvalue())).save(sc)
+                docs = [build_diary(tmp, d_str, si, sc)]
+                for idx, (proc, items) in enumerate(check_results.items()):
+                    if items: docs.append(build_chk(tmp, idx, proc, items, s_date))
+                if photo_data_list:
+                    docs.append(build_photos(photo_data_list, tmp))
+                writer = PdfWriter()
+                for dp in docs:
+                    subprocess.run(["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", tmp, dp], check=True)
+                    writer.append(os.path.splitext(dp)[0] + ".pdf")
+                f_pdf = os.path.join(tmp, "final.pdf")
+                writer.write(f_pdf)
+                with open(f_pdf, "rb") as fp:
+                    st.download_button("⬇️ 완성된 통합 PDF 다운로드", fp.read(), file_name=f"[별지2]공사감리일지({work_date}).pdf", mime="application/pdf", use_container_width=True)
