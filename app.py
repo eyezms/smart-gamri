@@ -11,7 +11,7 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v3.1)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v3.2)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
@@ -54,6 +54,7 @@ def is_extra(c):
     s = str(c).replace(" ", "")
     return ("외" in s) or ("추가" in s)
 
+# 1. 감리 구분 및 공사 개요 (담당자 모두 공란)
 st.subheader("1. 감리 구분 및 공사 개요")
 gubun = st.radio("감리업무 구분", ["비상주 감리", "책임상주 감리"], horizontal=True)
 site_name = st.text_input("공사명", value="서탄산업단지 (주)노바테크놀러지스 신축공사")
@@ -68,8 +69,13 @@ inspector = c4.text_input("건축사보(감리원)", value="", placeholder="성�
 chief_supervisor = c5.text_input("총괄감리책임자", value="", placeholder="성명 입력")
 contractor = c6.text_input("총괄 시공 책임자", value="", placeholder="성명 입력")
 
+# 2. 공종별 체크리스트 (기본업무 = 기본만 / 기본외 업무 = 기본+기본외 전체)
 st.subheader(f"2. [{gubun}] 공종별 체크리스트")
-task_filter = st.radio("업무 구분 선택", ["전체", "기본업무", "기본외 업무"], horizontal=True)
+task_mode = st.radio(
+    "업무 범위 선택",
+    ["기본업무", "기본외 업무 (기본업무 포함)"],
+    horizontal=True
+)
 selected_procs = st.multiselect("금일 감리 공종 선택", list(DB[gubun].keys()))
 
 check_results = {}
@@ -77,24 +83,26 @@ for proc in selected_procs:
     plist = get_proc_items(DB[gubun][proc])
     b_cnt = sum(1 for c, _ in plist if not is_extra(c))
     e_cnt = sum(1 for c, _ in plist if is_extra(c))
-    flist = [
-        (c, t) for c, t in plist
-        if task_filter == "전체" or (task_filter == "기본업무" and not is_extra(c)) or (task_filter == "기본외 업무" and is_extra(c))
-    ]
-    with st.expander(f"📋 {proc} (기본 {b_cnt} / 기본외 {e_cnt}) → 표시: {len(flist)}건", expanded=True):
+
+    if task_mode == "기본업무":
+        flist = [(c, t) for c, t in plist if not is_extra(c)]
+    else:
+        flist = plist  # 기본업무 + 기본외 업무 모두 포함
+
+    with st.expander(f"📋 {proc} (기본 {b_cnt}건 / 기본외 {e_cnt}건) → 적용: {len(flist)}건", expanded=True):
         check_results[proc] = []
-        if not flist:
-            st.info(f"'{task_filter}' 항목이 없습니다.")
         for idx, (c_str, i_str) in enumerate(flist):
             col_t, col_r = st.columns([3, 1])
             col_t.write(f"{'🔵' if is_extra(c_str) else '🟢'} **[{c_str}]** {i_str}")
-            res = col_r.selectbox("결과", ["적합", "부적합", "해당없음"], key=f"{proc}_{task_filter}_{idx}", label_visibility="collapsed")
+            res = col_r.selectbox("결과", ["적합", "부적합", "해당없음"], key=f"{proc}_{task_mode}_{idx}", label_visibility="collapsed")
             check_results[proc].append({"cat": c_str, "item": i_str, "res": res})
 
+# 3. 특기사항 및 지적사항
 st.subheader("3. 특기사항 및 지적사항")
 special_note = st.text_area("특기사항", value="- 해당공정 인부 안전관리 철저 주문\n- 용접공정이나 기타 인화물질자재 사용시 화재 안전기준 철저 주문")
 issue_note = st.text_area("지적사항 및 처리결과", value="")
 
+# 4. 현장 사진 업로드
 st.subheader("4. 📸 현장 사진 업로드 (사진대지 자동 병합)")
 if "saved_photos" not in st.session_state:
     st.session_state["saved_photos"] = []
@@ -128,6 +136,7 @@ if st.session_state["saved_photos"]:
             cap = st.text_input(f"사진 {i+1} 설명", value=f"시공 현황 ({location})", key=f"cap_{i}")
             photo_data_list.append((cb, cap))
 
+# 5. 결재 도장/서명 첨부
 st.subheader("5. ✍️ 결재 도장/서명 첨부")
 s1, s2 = st.columns(2)
 stamp_insp = s1.file_uploader("건축사보(감리원) 도장/서명", type=["png", "jpg", "jpeg"])
@@ -240,7 +249,7 @@ def build_diary(tmp, d_str, si, sc):
 
 def build_chk(tmp, idx, proc, items, s_date):
     doc = make_doc()
-    p0 = doc.add_paragraph(f"■ 건축공사 감리세부기준 [별표 1] ({gubun} - {task_filter})")
+    p0 = doc.add_paragraph(f"■ 건축공사 감리세부기준 [별표 1] ({gubun} - {task_mode})")
     p0.paragraph_format.space_after = Pt(3)
     p0.runs[0].font.size = Pt(8.5)
     tbl = doc.add_table(rows=6 + len(items), cols=5)
