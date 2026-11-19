@@ -11,7 +11,7 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v2.9)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v3.0)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
@@ -20,15 +20,18 @@ def clean_txt(t):
     return re.sub(r'^[☑☐■□✓✔•\-\s]+', '', str(t)).strip()
 
 def get_proc_items(proc_data):
-    """기본업무 / 기본외업무 구분을 100% 보존하여 (구분, 검사항목) 리스트로 반환"""
+    """checklist_db.json의 어떤 키/값 형태든 기본업무와 기본외업무를 정확히 분리"""
     result = []
+    # 케이스 1: {"기본업무": [...], "기본업무 외": [...]} 형태인 경우
     if isinstance(proc_data, dict):
         for cat_key, items_list in proc_data.items():
             if isinstance(items_list, list):
                 for raw in items_list:
-                    _, txt = parse_single(raw, default_cat=cat_key)
+                    _, txt = parse_single(raw, default_cat=str(cat_key))
                     result.append((str(cat_key), txt))
         return result
+
+    # 케이스 2: [{"cat": "기본업무 외", "item": "..."}, ...] 리스트 형태인 경우
     if isinstance(proc_data, list):
         for raw in proc_data:
             cat, txt = parse_single(raw, default_cat="기본업무")
@@ -37,25 +40,39 @@ def get_proc_items(proc_data):
 
 def parse_single(raw, default_cat="기본업무"):
     if isinstance(raw, str):
-        m = re.match(r'^\[?(기본\s*외\s*업무|기본\s*업무)\]?\s*(.+)', raw)
+        m = re.match(r'^\[?(기본\s*업무\s*외\vert{}기본\s*외\s*업무\vert{}기본\s*업무\vert{}기본\s*외)\]?\s*(.+)', raw)
         if m:
-            return m.group(1).replace(" ", ""), clean_txt(m.group(2))
+            return m.group(1).strip(), clean_txt(m.group(2))
         return default_cat, clean_txt(raw)
+
     if isinstance(raw, dict):
-        cat = default_cat
-        text = ""
+        cat = None
+        text = None
+        # 1차: 명시적인 구분 키('cat', 'category', '구분', 'type' 등) 우선 탐색
         for k, v in raw.items():
-            k_str = str(k).lower()
+            k_low = str(k).lower()
             v_str = str(v).strip()
-            if any(x in k_str for x in ["cat", "구분", "type", "gubun", "div"]) or v_str in ["기본업무", "기본외업무", "기본 외 업무"]:
+            if k_low in ["cat", "category", "구분", "type", "gubun", "div", "section"]:
                 cat = v_str
-            elif any(x in k_str for x in ["item", "text", "content", "검사항목", "항목", "title", "desc"]):
+            elif k_low in ["item", "text", "content", "검사항목", "항목", "title", "desc", "question"]:
                 text = v_str
-        if not text:
-            vals = [str(v).strip() for v in raw.values() if str(v).strip() and str(v).strip() != cat]
-            text = vals[-1] if vals else ""
-        return cat, clean_txt(text)
+
+        # 2차: 키 이름이 다른 경우 값의 길이나 '업무'/'외' 포함 여부로 자동 판별
+        if cat is None or text is None:
+            str_vals = [str(v).strip() for v in raw.values() if v is not None and str(v).strip()]
+            for sv in str_vals:
+                if cat is None and len(sv) <= 15 and ("업무" in sv or "기본" in sv or "외" in sv):
+                    cat = sv
+                elif text is None and sv != cat:
+                    text = sv
+
+        return (cat or default_cat), clean_txt(text or "")
     return default_cat, clean_txt(raw)
+
+def is_extra_task(cat_str):
+    """구분 텍스트가 기본외업무('기본업무 외', '기본외업무', '기본 외' 등)인지 판별"""
+    c = str(cat_str).replace(" ", "")
+    return ("외" in c) or ("추가" in c)
 
 # 1. 감리 구분 및 공사 개요 (담당자 모두 공란)
 st.subheader("1. 감리 구분 및 공사 개요")
@@ -72,7 +89,7 @@ inspector = c4.text_input("건축사보(감리원)", value="", placeholder="성�
 chief_supervisor = c5.text_input("총괄감리책임자", value="", placeholder="성명 입력")
 contractor = c6.text_input("총괄 시공 책임자", value="", placeholder="성명 입력")
 
-# 2. 공종별 체크리스트 (전체 / 기본업무 / 기본외 업무 필터 복원)
+# 2. 공종별 체크리스트 (전체 / 기본업무 / 기본외 업무 필터)
 st.subheader(f"2. [{gubun}] 공종별 체크리스트")
 task_filter = st.radio("업무 구분 선택", ["전체", "기본업무", "기본외 업무"], horizontal=True)
 selected_procs = st.multiselect("금일 감리 공종 선택", list(DB[gubun].keys()))
@@ -80,24 +97,26 @@ selected_procs = st.multiselect("금일 감리 공종 선택", list(DB[gubun].ke
 check_results = {}
 for proc in selected_procs:
     parsed_list = get_proc_items(DB[gubun][proc])
-    # 선택된 업무 구분에 따라 항목 필터링
+    basic_cnt = sum(1 for c, _ in parsed_list if not is_extra_task(c))
+    extra_cnt = sum(1 for c, _ in parsed_list if is_extra_task(c))
+
     filtered_list = []
     for cat_str, item_str in parsed_list:
-        is_extra = "외" in cat_str.replace(" ", "")
+        extra = is_extra_task(cat_str)
         if task_filter == "전체":
             filtered_list.append((cat_str, item_str))
-        elif task_filter == "기본업무" and not is_extra:
+        elif task_filter == "기본업무" and not extra:
             filtered_list.append((cat_str, item_str))
-        elif task_filter == "기본외 업무" and is_extra:
+        elif task_filter == "기본외 업무" and extra:
             filtered_list.append((cat_str, item_str))
 
-    with st.expander(f"📋 {proc} 점검항목 ({task_filter}: {len(filtered_list)}건)", expanded=True):
+    with st.expander(f"📋 {proc} (전체 {len(parsed_list)}건 = 기본 {basic_cnt} / 기본외 {extra_cnt}) → 현재 표시: {len(filtered_list)}건", expanded=True):
         check_results[proc] = []
         if not filtered_list:
-            st.info(f"선택한 '{task_filter}'에 해당하는 항목이 없습니다.")
+            st.info(f"해당 공종에는 '{task_filter}' 항목이 없습니다.")
         for idx, (cat_str, item_str) in enumerate(filtered_list):
             col_t, col_r = st.columns([3, 1])
-            badge = "🔵" if "외" in cat_str else "🟢"
+            badge = "🔵" if is_extra_task(cat_str) else "🟢"
             col_t.write(f"{badge} **[{cat_str}]** {item_str}")
             res = col_r.selectbox("결과", ["적합", "부적합", "해당없음"], key=f"{proc}_{task_filter}_{idx}", label_visibility="collapsed")
             check_results[proc].append({"cat": cat_str, "item": item_str, "res": res})
@@ -360,54 +379,4 @@ def build_photos(p_list, tmpdir):
         for j in range(2):
             if i + j < len(p_list):
                 clean_bytes, cap_txt = p_list[i + j]
-                pp = os.path.join(tmpdir, f"clean_p_{i+j}.jpg")
-                with open(pp, "wb") as f_out:
-                    f_out.write(clean_bytes)
-
-                set_cell_margins(row[j], 45, 45, 45, 45)
-                p_img = row[j].paragraphs[0]
-                p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                p_img.add_run().add_picture(pp, width=Mm(82))
-
-                p_cap = row[j].add_paragraph(f"[사진 {i+j+1}] {cap_txt}")
-                p_cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                p_cap.runs[0].font.size = Pt(8.5)
-
-    out = os.path.join(tmpdir, "photos.docx")
-    doc.save(out)
-    return out
-
-if st.button("📄 통합 감리일지 PDF 생성", type="primary", use_container_width=True):
-    if not selected_procs:
-        st.warning("최소 1개 이상의 공종을 선택해 주세요.")
-    else:
-        with st.spinner("통합 PDF 문서를 생성 중입니다..."):
-            with tempfile.TemporaryDirectory() as tmpdir:
-                wk = ["월", "화", "수", "목", "금", "토", "일"][work_date.weekday()]
-                date_str = f"{work_date.year}년 {work_date.month:02d}월 {work_date.day:02d}일 ({wk}요일)"
-                short_date = f"{work_date.year}년 {work_date.month:02d}월 {work_date.day:02d}일"
-
-                si_p, sc_p = None, None
-                if stamp_insp:
-                    si_p = os.path.join(tmpdir, "si.png")
-                    Image.open(io.BytesIO(stamp_insp.getvalue())).save(si_p)
-                if stamp_chief:
-                    sc_p = os.path.join(tmpdir, "sc.png")
-                    Image.open(io.BytesIO(stamp_chief.getvalue())).save(sc_p)
-
-                docs = [build_diary(tmpdir, date_str, si_p, sc_p)]
-                for idx, (proc, items) in enumerate(check_results.items()):
-                    if items:
-                        docs.append(build_chk(tmpdir, idx, proc, items, short_date))
-                if photo_data_list:
-                    docs.append(build_photos(photo_data_list, tmpdir))
-
-                writer = PdfWriter()
-                for dp in docs:
-                    subprocess.run(["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", tmpdir, dp], check=True)
-                    writer.append(os.path.splitext(dp)[0] + ".pdf")
-
-                final_pdf = os.path.join(tmpdir, "final.pdf")
-                writer.write(final_pdf)
-                with open(final_pdf, "rb") as fp:
-                    st.download_button("⬇️ 완성된 통합 PDF 다운로드", fp.read(), file_name=f"[별지2]공사감리일지({work_date}).pdf", mime="application/pdf", use_container_width=True)
+                pp = os.path.join(tmpdir,
