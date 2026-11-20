@@ -11,7 +11,7 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v3.7)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v3.8)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
@@ -23,7 +23,6 @@ def is_extra(c):
     s = str(c).replace(" ", "")
     return ("외" in s) or ("추가" in s)
 
-# 법정 서식 [별표 1] 비상주 감리 '기본업무' 핵심 항목 판별 키워드
 BASIC_KW = [
     "고저차", "벤치 마크", "벤치마크", "bm", "먹매김", "지내력", "지지층",
     "ks", "자재성능", "최종 마감", "최종마감", "최종 설치", "동결선", "터파기 깊이",
@@ -40,11 +39,26 @@ def classify_item(gubun_name, proc_name, idx, raw_cat, text_str):
         return "기본외업무"
     if "상주" in gubun_name:
         return "기본업무"
-    # 비상주 가설공사: 앞 7건 기본업무, 이후 기본외업무
     if "가설" in proc_name:
         return "기본업무" if idx < 7 else "기본외업무"
-    # 기타 비상주 공종: 법정 기준 핵심 키워드 포함 시 기본업무, 그 외 기본외업무
     return "기본업무" if any(kw in text_str.lower() for kw in BASIC_KW) else "기본외업무"
+
+def parse_dict_item(item_dict, default_cat="기본업무"):
+    cat = default_cat
+    candidates = []
+    for k, v in item_dict.items():
+        if v is None:
+            continue
+        vs = str(v).strip()
+        if not vs:
+            continue
+        if vs in ["기본업무", "기본외업무", "기본 외 업무", "기본업무 외"] or str(k) in ["cat", "category", "구분", "type"]:
+            cat = vs
+        else:
+            candidates.append(vs)
+    # 후보 중 가장 긴 문자열을 검사항목 본문으로 선택 (내용 누락 원천 차단)
+    txt = max(candidates, key=len) if candidates else ""
+    return cat, clean_txt(txt)
 
 def extract_items(gubun_name, proc_name, proc_data):
     raw_list = []
@@ -52,14 +66,16 @@ def extract_items(gubun_name, proc_name, proc_data):
         for k, v in proc_data.items():
             if isinstance(v, list):
                 for item in v:
-                    txt = item.get("item") or item.get("text") or item.get("검사항목") or str(item) if isinstance(item, dict) else str(item)
-                    raw_list.append((str(k).strip(), clean_txt(txt)))
+                    if isinstance(item, dict):
+                        _, txt = parse_dict_item(item, str(k))
+                    else:
+                        txt = clean_txt(item)
+                    raw_list.append((str(k).strip(), txt))
     elif isinstance(proc_data, list):
         for item in proc_data:
             if isinstance(item, dict):
-                cat = item.get("cat") or item.get("category") or item.get("구분") or "기본업무"
-                txt = item.get("item") or item.get("text") or item.get("검사항목") or item.get("content") or ""
-                raw_list.append((str(cat).strip(), clean_txt(txt)))
+                cat, txt = parse_dict_item(item, "기본업무")
+                raw_list.append((cat, txt))
             else:
                 raw_list.append(("기본업무", clean_txt(item)))
     return [(classify_item(gubun_name, proc_name, idx, rc, rt), rt) for idx, (rc, rt) in enumerate(raw_list)]
@@ -79,7 +95,7 @@ inspector = c4.text_input("건축사보(감리원)", value="", placeholder="성�
 chief_supervisor = c5.text_input("총괄감리책임자", value="", placeholder="성명 입력")
 contractor = c6.text_input("총괄 시공 책임자", value="", placeholder="성명 입력")
 
-# 2. 공종별 체크리스트 (기본업무 / 기본외업무 구분)
+# 2. 공종별 체크리스트
 st.subheader(f"2. [{gubun}] 공종별 체크리스트")
 task_mode = st.radio("업무 구분 선택", ["기본업무", "기본외업무"], horizontal=True)
 selected_procs = st.multiselect("금일 감리 공종 선택", list(DB[gubun].keys()))
@@ -104,7 +120,7 @@ st.subheader("3. 특기사항 및 지적사항")
 special_note = st.text_area("특기사항", value="- 해당공정 인부 안전관리 철저 주문\n- 용접공정이나 기타 인화물질자재 사용시 화재 안전기준 철저 주문")
 issue_note = st.text_area("지적사항 및 처리결과", value="")
 
-# 4. 현장 사진 업로드 (원래 위치로 복원)
+# 4. 현장 사진 업로드
 st.subheader("4. 📸 현장 사진 업로드 (사진대지 자동 병합)")
 if "photos_bin" not in st.session_state:
     st.session_state["photos_bin"] = []
