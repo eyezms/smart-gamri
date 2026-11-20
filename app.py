@@ -11,7 +11,7 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v4.2)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v4.3)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
