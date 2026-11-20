@@ -11,7 +11,7 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v3.4)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v3.5)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
@@ -23,34 +23,55 @@ def is_extra(c):
     s = str(c).replace(" ", "")
     return ("외" in s) or ("추가" in s)
 
-def extract_items(proc_data):
-    """checklist_db.json의 실제 구조를 분석하여 (구분, 검사항목) 튜플 리스트로 추출"""
-    out = []
+# 법정 서식 [별표 1] 비상주 감리 '기본업무' 핵심 키워드 (자재/KS/최종마감/초기측량 등)
+BASIC_KEYWORDS = [
+    "고저차", "벤치 마크", "벤치마크", "bm", "먹매김", "지내력", "지지층",
+    "ks", "자재성능", "최종 마감", "최종마감", "최종 설치", "동결선", "터파기 깊이",
+    "토질상태", "말뚝박기 관련 도서", "말뚝 시공완료", "바닥면의 레벨", "지정공사의 확인",
+    "철근배근의 확인", "레디믹스트", "레미콘", "강재 규격", "설계도서와의 대조",
+    "제작도면", "현치도", "앵커 볼트", "무수축 모르타르", "제조업자의 관련 자료",
+    "강재의 재질 규격", "강재시험성적표", "방화셔터", "방화문", "개폐상태", "개폐장치",
+    "미끄럼방지", "미끄럼 방지", "누수검사", "난간 등의 높이", "배연창 및 피난창",
+    "고효율 에너지", "전기안전검사필증", "통신관련 검사필증", "소방관련 검사필증"
+]
+
+def classify_item(gubun_name, proc_name, idx, raw_cat, text_str):
+    # 1. DB에 이미 '기본외업무'로 명시되어 있으면 그대로 유지
+    if is_extra(raw_cat):
+        return "기본외업무"
+    # 2. 책임상주 감리는 법정 서식상 전 항목 '기본업무'
+    if "상주" in gubun_name:
+        return "기본업무"
+    # 3. 비상주 감리 가설공사: 앞 7개 항목까지 기본업무, 이후는 기본외업무
+    if "가설" in proc_name:
+        return "기본업무" if idx < 7 else "기본외업무"
+    # 4. 기타 비상주 공종: 법정 [별표 1] 기본업무 키워드 매칭
+    low = text_str.lower()
+    if any(kw in low for kw in BASIC_KEYWORDS):
+        return "기본업무"
+    return "기본외업무"
+
+def extract_items(gubun_name, proc_name, proc_data):
+    raw_list = []
     if isinstance(proc_data, dict):
         for k, v in proc_data.items():
             if isinstance(v, list):
                 for item in v:
                     txt = item.get("item") or item.get("text") or item.get("검사항목") or str(item) if isinstance(item, dict) else str(item)
-                    out.append((str(k).strip(), clean_txt(txt)))
+                    raw_list.append((str(k).strip(), clean_txt(txt)))
     elif isinstance(proc_data, list):
-        for idx, item in enumerate(proc_data):
+        for item in proc_data:
             if isinstance(item, dict):
-                cat = item.get("cat") or item.get("category") or item.get("구분") or item.get("type")
-                txt = item.get("item") or item.get("text") or item.get("검사항목") or item.get("content")
-                if not cat:
-                    for vk, vv in item.items():
-                        if any(w in str(vv) for w in ["기본", "외", "업무"]):
-                            cat = str(vv).strip()
-                        elif not txt:
-                            txt = str(vv).strip()
-                out.append((str(cat or "기본업무").strip(), clean_txt(txt or "")))
+                cat = item.get("cat") or item.get("category") or item.get("구분") or "기본업무"
+                txt = item.get("item") or item.get("text") or item.get("검사항목") or item.get("content") or ""
+                raw_list.append((str(cat).strip(), clean_txt(txt)))
             else:
-                s = str(item).strip()
-                m = re.match(r'^\[?(기본\s*외\s*업무|기본\s*업무\s*외|기본\s*업무)\]?\s*(.+)', s)
-                if m:
-                    out.append((m.group(1).replace(" ", ""), clean_txt(m.group(2))))
-                else:
-                    out.append(("기본업무", clean_txt(s)))
+                raw_list.append(("기본업무", clean_txt(item)))
+
+    out = []
+    for idx, (rc, rt) in enumerate(raw_list):
+        final_cat = classify_item(gubun_name, proc_name, idx, rc, rt)
+        out.append((final_cat, rt))
     return out
 
 # 1. 감리 구분 및 공사 개요
@@ -75,17 +96,15 @@ selected_procs = st.multiselect("금일 감리 공종 선택", list(DB[gubun].ke
 
 check_results = {}
 for proc in selected_procs:
-    all_items = extract_items(DB[gubun][proc])
+    all_items = extract_items(gubun, proc, DB[gubun][proc])
     b_items = [(c, t) for c, t in all_items if not is_extra(c)]
     e_items = [(c, t) for c, t in all_items if is_extra(c)]
 
     # 기본업무 선택 시 기본업무만 / 기본외업무 선택 시 기본+기본외 전체
     show_items = b_items if task_mode == "기본업무" else all_items
 
-    with st.expander(f"📋 {proc} [DB상태: 기본업무 {len(b_items)}건 / 기본외업무 {len(e_items)}건] → 현재 출력 {len(show_items)}건", expanded=True):
+    with st.expander(f"📋 {proc} (기본업무 {len(b_items)}건 / 기본외업무 {len(e_items)}건) → 현재 출력 {len(show_items)}건", expanded=True):
         check_results[proc] = []
-        if len(e_items) == 0:
-            st.caption("ℹ️ 현재 DB의 해당 공종에는 '기본외업무'로 분류된 항목이 0건입니다.")
         for idx, (c_str, i_str) in enumerate(show_items):
             col_t, col_r = st.columns([3, 1])
             badge = "🔵" if is_extra(c_str) else "🟢"
@@ -98,7 +117,7 @@ st.subheader("3. 특기사항 및 지적사항")
 special_note = st.text_area("특기사항", value="- 해당공정 인부 안전관리 철저 주문\n- 용접공정이나 기타 인화물질자재 사용시 화재 안전기준 철저 주문")
 issue_note = st.text_area("지적사항 및 처리결과", value="")
 
-# 4. 현장 사진 업로드 (모바일 앨범 호환성 100% 강화)
+# 4. 현장 사진 업로드
 st.subheader("4. 📸 현장 사진 업로드 (사진대지 자동 병합)")
 if "photos_bin" not in st.session_state:
     st.session_state["photos_bin"] = []
@@ -108,10 +127,7 @@ if up_files:
     temp_imgs = []
     for f_obj in up_files:
         try:
-            b_raw = f_obj.read()
-            f_obj.seek(0)
-            if not b_raw:
-                b_raw = f_obj.getvalue()
+            b_raw = f_obj.getvalue()
             im = ImageOps.exif_transpose(Image.open(io.BytesIO(b_raw))).convert("RGB")
             im.thumbnail((900, 900))
             out_b = io.BytesIO()
