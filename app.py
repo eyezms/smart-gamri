@@ -11,7 +11,7 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v3.3)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v3.4)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
@@ -23,45 +23,37 @@ def is_extra(c):
     s = str(c).replace(" ", "")
     return ("외" in s) or ("추가" in s)
 
-def parse_single(raw, default_cat="기본업무"):
-    if isinstance(raw, str):
-        m = re.match(r'^\[?(기본\s*업무\s*외|기본\s*외\s*업무|기본\s*업무|기본\s*외)\]?\s*(.+)', raw)
-        return (m.group(1).replace(" ", ""), clean_txt(m.group(2))) if m else (default_cat, clean_txt(raw))
-    if isinstance(raw, dict):
-        cat, text = None, None
-        # 1. 명시적 구분/항목 키 매핑
-        for k, v in raw.items():
-            kl, vs = str(k).lower().strip(), str(v).strip()
-            if kl in ["cat", "category", "구분", "type", "gubun", "div", "section", "업무구분"]:
-                cat = vs
-            elif kl in ["item", "text", "content", "검사항목", "항목", "title", "desc", "question", "내용"]:
-                text = vs
-        # 2. 값 내용 기반 판별 ('기본외업무' 등이 다른 키에 들어있는 경우 포착)
-        for k, v in raw.items():
-            vs = str(v).strip()
-            if not vs: continue
-            if ("기본" in vs and "업무" in vs) or vs in ["기본업무", "기본외업무", "기본 외 업무", "기본업무 외"]:
-                cat = vs
-            elif text is None and vs != cat:
-                text = vs
-        return (cat or default_cat), clean_txt(text or "")
-    return default_cat, clean_txt(raw)
-
-def get_proc_items(proc_data):
-    res = []
+def extract_items(proc_data):
+    """checklist_db.json의 실제 구조를 분석하여 (구분, 검사항목) 튜플 리스트로 추출"""
+    out = []
     if isinstance(proc_data, dict):
-        for ck, ilist in proc_data.items():
-            if isinstance(ilist, list):
-                for r in ilist:
-                    c_parsed, t_parsed = parse_single(r, str(ck))
-                    final_cat = str(ck) if ("기본" in str(ck) or "외" in str(ck)) else c_parsed
-                    res.append((final_cat, t_parsed))
+        for k, v in proc_data.items():
+            if isinstance(v, list):
+                for item in v:
+                    txt = item.get("item") or item.get("text") or item.get("검사항목") or str(item) if isinstance(item, dict) else str(item)
+                    out.append((str(k).strip(), clean_txt(txt)))
     elif isinstance(proc_data, list):
-        for r in proc_data:
-            res.append(parse_single(r, "기본업무"))
-    return res
+        for idx, item in enumerate(proc_data):
+            if isinstance(item, dict):
+                cat = item.get("cat") or item.get("category") or item.get("구분") or item.get("type")
+                txt = item.get("item") or item.get("text") or item.get("검사항목") or item.get("content")
+                if not cat:
+                    for vk, vv in item.items():
+                        if any(w in str(vv) for w in ["기본", "외", "업무"]):
+                            cat = str(vv).strip()
+                        elif not txt:
+                            txt = str(vv).strip()
+                out.append((str(cat or "기본업무").strip(), clean_txt(txt or "")))
+            else:
+                s = str(item).strip()
+                m = re.match(r'^\[?(기본\s*외\s*업무|기본\s*업무\s*외|기본\s*업무)\]?\s*(.+)', s)
+                if m:
+                    out.append((m.group(1).replace(" ", ""), clean_txt(m.group(2))))
+                else:
+                    out.append(("기본업무", clean_txt(s)))
+    return out
 
-# 1. 감리 구분 및 공사 개요 (담당자 모두 공란)
+# 1. 감리 구분 및 공사 개요
 st.subheader("1. 감리 구분 및 공사 개요")
 gubun = st.radio("감리업무 구분", ["비상주 감리", "책임상주 감리"], horizontal=True)
 site_name = st.text_input("공사명", value="서탄산업단지 (주)노바테크놀러지스 신축공사")
@@ -76,27 +68,28 @@ inspector = c4.text_input("건축사보(감리원)", value="", placeholder="성�
 chief_supervisor = c5.text_input("총괄감리책임자", value="", placeholder="성명 입력")
 contractor = c6.text_input("총괄 시공 책임자", value="", placeholder="성명 입력")
 
-# 2. 공종별 체크리스트 (기본업무 = 기본만 / 기본외업무 = 구분 내용 전체)
+# 2. 공종별 체크리스트
 st.subheader(f"2. [{gubun}] 공종별 체크리스트")
 task_mode = st.radio("업무 구분 선택", ["기본업무", "기본외업무"], horizontal=True)
 selected_procs = st.multiselect("금일 감리 공종 선택", list(DB[gubun].keys()))
 
 check_results = {}
 for proc in selected_procs:
-    plist = get_proc_items(DB[gubun][proc])
-    b_cnt = sum(1 for c, _ in plist if not is_extra(c))
-    e_cnt = sum(1 for c, _ in plist if is_extra(c))
+    all_items = extract_items(DB[gubun][proc])
+    b_items = [(c, t) for c, t in all_items if not is_extra(c)]
+    e_items = [(c, t) for c, t in all_items if is_extra(c)]
 
-    if task_mode == "기본업무":
-        flist = [(c, t) for c, t in plist if not is_extra(c)]
-    else:
-        flist = plist  # 기본외업무 선택 시 기본업무 + 기본외업무 전체 출력
+    # 기본업무 선택 시 기본업무만 / 기본외업무 선택 시 기본+기본외 전체
+    show_items = b_items if task_mode == "기본업무" else all_items
 
-    with st.expander(f"📋 {proc} (기본 {b_cnt}건 / 기본외 {e_cnt}건) → 출력: {len(flist)}건", expanded=True):
+    with st.expander(f"📋 {proc} [DB상태: 기본업무 {len(b_items)}건 / 기본외업무 {len(e_items)}건] → 현재 출력 {len(show_items)}건", expanded=True):
         check_results[proc] = []
-        for idx, (c_str, i_str) in enumerate(flist):
+        if len(e_items) == 0:
+            st.caption("ℹ️ 현재 DB의 해당 공종에는 '기본외업무'로 분류된 항목이 0건입니다.")
+        for idx, (c_str, i_str) in enumerate(show_items):
             col_t, col_r = st.columns([3, 1])
-            col_t.write(f"{'🔵' if is_extra(c_str) else '🟢'} **[{c_str}]** {i_str}")
+            badge = "🔵" if is_extra(c_str) else "🟢"
+            col_t.write(f"{badge} **[{c_str}]** {i_str}")
             res = col_r.selectbox("결과", ["적합", "부적합", "해당없음"], key=f"{proc}_{task_mode}_{idx}", label_visibility="collapsed")
             check_results[proc].append({"cat": c_str, "item": i_str, "res": res})
 
@@ -105,39 +98,43 @@ st.subheader("3. 특기사항 및 지적사항")
 special_note = st.text_area("특기사항", value="- 해당공정 인부 안전관리 철저 주문\n- 용접공정이나 기타 인화물질자재 사용시 화재 안전기준 철저 주문")
 issue_note = st.text_area("지적사항 및 처리결과", value="")
 
-# 4. 현장 사진 업로드
+# 4. 현장 사진 업로드 (모바일 앨범 호환성 100% 강화)
 st.subheader("4. 📸 현장 사진 업로드 (사진대지 자동 병합)")
-if "saved_photos" not in st.session_state:
-    st.session_state["saved_photos"] = []
+if "photos_bin" not in st.session_state:
+    st.session_state["photos_bin"] = []
 
-up_photos = st.file_uploader("현장 사진 선택 (여러 장 가능)", accept_multiple_files=True, key="photo_uploader")
-if up_photos:
-    nlist = []
-    for pf in up_photos:
+up_files = st.file_uploader("앨범에서 현장 사진 선택 (여러 장 가능)", accept_multiple_files=True, key="album_up")
+if up_files:
+    temp_imgs = []
+    for f_obj in up_files:
         try:
-            img = ImageOps.exif_transpose(Image.open(io.BytesIO(pf.getvalue()))).convert("RGB")
-            img.thumbnail((1000, 1000))
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=85)
-            nlist.append((pf.name, buf.getvalue()))
-        except Exception as e:
-            st.error(f"이미지 오류 ({pf.name}): {e}")
-    if nlist:
-        st.session_state["saved_photos"] = nlist
+            b_raw = f_obj.read()
+            f_obj.seek(0)
+            if not b_raw:
+                b_raw = f_obj.getvalue()
+            im = ImageOps.exif_transpose(Image.open(io.BytesIO(b_raw))).convert("RGB")
+            im.thumbnail((900, 900))
+            out_b = io.BytesIO()
+            im.save(out_b, format="JPEG", quality=82)
+            temp_imgs.append((f_obj.name, out_b.getvalue()))
+        except Exception as err:
+            st.warning(f"사진 변환 실패({f_obj.name}): {err}")
+    if temp_imgs:
+        st.session_state["photos_bin"] = temp_imgs
 
 photo_data_list = []
-if st.session_state["saved_photos"]:
-    ci, cc = st.columns([3, 1])
-    ci.success(f"✅ 총 {len(st.session_state['saved_photos'])}장 준비 완료")
-    if cc.button("사진 초기화"):
-        st.session_state["saved_photos"] = []
+if st.session_state["photos_bin"]:
+    c_ok, c_del = st.columns([3, 1])
+    c_ok.success(f"✅ 앨범 사진 {len(st.session_state['photos_bin'])}장 첨부 완료 (PDF 맨 뒤에 자동 병합됨)")
+    if c_del.button("사진 모두 지우기"):
+        st.session_state["photos_bin"] = []
         st.rerun()
     cols = st.columns(2)
-    for i, (fn, cb) in enumerate(st.session_state["saved_photos"]):
+    for i, (fn, jb) in enumerate(st.session_state["photos_bin"]):
         with cols[i % 2]:
-            st.image(cb, caption=f"사진 {i+1}", use_container_width=True)
-            cap = st.text_input(f"사진 {i+1} 설명", value=f"시공 현황 ({location})", key=f"cap_{i}")
-            photo_data_list.append((cb, cap))
+            st.image(jb, caption=f"사진 {i+1}", use_container_width=True)
+            cap = st.text_input(f"사진 {i+1} 설명", value=f"시공 현황 ({location})", key=f"pcap_{i}")
+            photo_data_list.append((jb, cap))
 
 # 5. 결재 도장/서명 첨부
 st.subheader("5. ✍️ 결재 도장/서명 첨부")
