@@ -11,41 +11,7 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v3.6)")
-
-# [최상단 배치] 현장 사진 업로드 (스크롤 없이 즉시 확인)
-st.subheader("📸 0. 현장 사진 업로드 (사진대지 자동 병합)")
-if "photos_bin" not in st.session_state:
-    st.session_state["photos_bin"] = []
-
-up_files = st.file_uploader("앨범에서 현장 사진 선택 (여러 장 가능)", accept_multiple_files=True, key="top_album_up")
-if up_files:
-    temp_imgs = []
-    for f_obj in up_files:
-        try:
-            im = ImageOps.exif_transpose(Image.open(io.BytesIO(f_obj.getvalue()))).convert("RGB")
-            im.thumbnail((900, 900))
-            out_b = io.BytesIO()
-            im.save(out_b, format="JPEG", quality=82)
-            temp_imgs.append((f_obj.name, out_b.getvalue()))
-        except Exception as err:
-            st.warning(f"사진 변환 실패({f_obj.name}): {err}")
-    if temp_imgs:
-        st.session_state["photos_bin"] = temp_imgs
-
-photo_data_list = []
-if st.session_state["photos_bin"]:
-    c_ok, c_del = st.columns([3, 1])
-    c_ok.success(f"✅ 사진 {len(st.session_state['photos_bin'])}장 첨부 완료")
-    if c_del.button("사진 초기화"):
-        st.session_state["photos_bin"] = []
-        st.rerun()
-    cols = st.columns(2)
-    for i, (fn, jb) in enumerate(st.session_state["photos_bin"]):
-        with cols[i % 2]:
-            st.image(jb, caption=f"사진 {i+1}", use_container_width=True)
-            cap = st.text_input(f"사진 {i+1} 설명", value="시공 현황", key=f"pcap_{i}")
-            photo_data_list.append((jb, cap))
+st.title("🏗️ 공사감리일지 & 체크리스트 (v3.7)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
@@ -57,6 +23,7 @@ def is_extra(c):
     s = str(c).replace(" ", "")
     return ("외" in s) or ("추가" in s)
 
+# 법정 서식 [별표 1] 비상주 감리 '기본업무' 핵심 항목 판별 키워드
 BASIC_KW = [
     "고저차", "벤치 마크", "벤치마크", "bm", "먹매김", "지내력", "지지층",
     "ks", "자재성능", "최종 마감", "최종마감", "최종 설치", "동결선", "터파기 깊이",
@@ -69,9 +36,14 @@ BASIC_KW = [
 ]
 
 def classify_item(gubun_name, proc_name, idx, raw_cat, text_str):
-    if is_extra(raw_cat): return "기본외업무"
-    if "상주" in gubun_name: return "기본업무"
-    if "가설" in proc_name: return "기본업무" if idx < 7 else "기본외업무"
+    if is_extra(raw_cat):
+        return "기본외업무"
+    if "상주" in gubun_name:
+        return "기본업무"
+    # 비상주 가설공사: 앞 7건 기본업무, 이후 기본외업무
+    if "가설" in proc_name:
+        return "기본업무" if idx < 7 else "기본외업무"
+    # 기타 비상주 공종: 법정 기준 핵심 키워드 포함 시 기본업무, 그 외 기본외업무
     return "기본업무" if any(kw in text_str.lower() for kw in BASIC_KW) else "기본외업무"
 
 def extract_items(gubun_name, proc_name, proc_data):
@@ -92,6 +64,7 @@ def extract_items(gubun_name, proc_name, proc_data):
                 raw_list.append(("기본업무", clean_txt(item)))
     return [(classify_item(gubun_name, proc_name, idx, rc, rt), rt) for idx, (rc, rt) in enumerate(raw_list)]
 
+# 1. 감리 구분 및 공사 개요
 st.subheader("1. 감리 구분 및 공사 개요")
 gubun = st.radio("감리업무 구분", ["비상주 감리", "책임상주 감리"], horizontal=True)
 site_name = st.text_input("공사명", value="서탄산업단지 (주)노바테크놀러지스 신축공사")
@@ -106,6 +79,7 @@ inspector = c4.text_input("건축사보(감리원)", value="", placeholder="성�
 chief_supervisor = c5.text_input("총괄감리책임자", value="", placeholder="성명 입력")
 contractor = c6.text_input("총괄 시공 책임자", value="", placeholder="성명 입력")
 
+# 2. 공종별 체크리스트 (기본업무 / 기본외업무 구분)
 st.subheader(f"2. [{gubun}] 공종별 체크리스트")
 task_mode = st.radio("업무 구분 선택", ["기본업무", "기본외업무"], horizontal=True)
 selected_procs = st.multiselect("금일 감리 공종 선택", list(DB[gubun].keys()))
@@ -125,11 +99,47 @@ for proc in selected_procs:
             res = col_r.selectbox("결과", ["적합", "부적합", "해당없음"], key=f"{proc}_{task_mode}_{idx}", label_visibility="collapsed")
             check_results[proc].append({"cat": c_str, "item": i_str, "res": res})
 
+# 3. 특기사항 및 지적사항
 st.subheader("3. 특기사항 및 지적사항")
 special_note = st.text_area("특기사항", value="- 해당공정 인부 안전관리 철저 주문\n- 용접공정이나 기타 인화물질자재 사용시 화재 안전기준 철저 주문")
 issue_note = st.text_area("지적사항 및 처리결과", value="")
 
-st.subheader("4. ✍️ 결재 도장/서명 첨부")
+# 4. 현장 사진 업로드 (원래 위치로 복원)
+st.subheader("4. 📸 현장 사진 업로드 (사진대지 자동 병합)")
+if "photos_bin" not in st.session_state:
+    st.session_state["photos_bin"] = []
+
+up_files = st.file_uploader("앨범에서 현장 사진 선택 (여러 장 가능)", accept_multiple_files=True, key="album_up")
+if up_files:
+    temp_imgs = []
+    for f_obj in up_files:
+        try:
+            im = ImageOps.exif_transpose(Image.open(io.BytesIO(f_obj.getvalue()))).convert("RGB")
+            im.thumbnail((900, 900))
+            out_b = io.BytesIO()
+            im.save(out_b, format="JPEG", quality=82)
+            temp_imgs.append((f_obj.name, out_b.getvalue()))
+        except Exception as err:
+            st.warning(f"사진 변환 실패({f_obj.name}): {err}")
+    if temp_imgs:
+        st.session_state["photos_bin"] = temp_imgs
+
+photo_data_list = []
+if st.session_state["photos_bin"]:
+    c_ok, c_del = st.columns([3, 1])
+    c_ok.success(f"✅ 사진 {len(st.session_state['photos_bin'])}장 첨부 완료 (PDF 맨 뒤에 병합됩니다)")
+    if c_del.button("사진 초기화"):
+        st.session_state["photos_bin"] = []
+        st.rerun()
+    cols = st.columns(2)
+    for i, (fn, jb) in enumerate(st.session_state["photos_bin"]):
+        with cols[i % 2]:
+            st.image(jb, caption=f"사진 {i+1}", use_container_width=True)
+            cap = st.text_input(f"사진 {i+1} 설명", value=f"시공 현황 ({location})", key=f"pcap_{i}")
+            photo_data_list.append((jb, cap))
+
+# 5. 결재 도장/서명 첨부
+st.subheader("5. ✍️ 결재 도장/서명 첨부")
 s1, s2 = st.columns(2)
 stamp_insp = s1.file_uploader("건축사보(감리원) 도장/서명", type=["png", "jpg", "jpeg"])
 stamp_chief = s2.file_uploader("총괄감리책임자 도장/서명", type=["png", "jpg", "jpeg"])
