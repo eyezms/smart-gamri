@@ -11,7 +11,41 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v3.5)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v3.6)")
+
+# [최상단 배치] 현장 사진 업로드 (스크롤 없이 즉시 확인)
+st.subheader("📸 0. 현장 사진 업로드 (사진대지 자동 병합)")
+if "photos_bin" not in st.session_state:
+    st.session_state["photos_bin"] = []
+
+up_files = st.file_uploader("앨범에서 현장 사진 선택 (여러 장 가능)", accept_multiple_files=True, key="top_album_up")
+if up_files:
+    temp_imgs = []
+    for f_obj in up_files:
+        try:
+            im = ImageOps.exif_transpose(Image.open(io.BytesIO(f_obj.getvalue()))).convert("RGB")
+            im.thumbnail((900, 900))
+            out_b = io.BytesIO()
+            im.save(out_b, format="JPEG", quality=82)
+            temp_imgs.append((f_obj.name, out_b.getvalue()))
+        except Exception as err:
+            st.warning(f"사진 변환 실패({f_obj.name}): {err}")
+    if temp_imgs:
+        st.session_state["photos_bin"] = temp_imgs
+
+photo_data_list = []
+if st.session_state["photos_bin"]:
+    c_ok, c_del = st.columns([3, 1])
+    c_ok.success(f"✅ 사진 {len(st.session_state['photos_bin'])}장 첨부 완료")
+    if c_del.button("사진 초기화"):
+        st.session_state["photos_bin"] = []
+        st.rerun()
+    cols = st.columns(2)
+    for i, (fn, jb) in enumerate(st.session_state["photos_bin"]):
+        with cols[i % 2]:
+            st.image(jb, caption=f"사진 {i+1}", use_container_width=True)
+            cap = st.text_input(f"사진 {i+1} 설명", value="시공 현황", key=f"pcap_{i}")
+            photo_data_list.append((jb, cap))
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
@@ -23,8 +57,7 @@ def is_extra(c):
     s = str(c).replace(" ", "")
     return ("외" in s) or ("추가" in s)
 
-# 법정 서식 [별표 1] 비상주 감리 '기본업무' 핵심 키워드 (자재/KS/최종마감/초기측량 등)
-BASIC_KEYWORDS = [
+BASIC_KW = [
     "고저차", "벤치 마크", "벤치마크", "bm", "먹매김", "지내력", "지지층",
     "ks", "자재성능", "최종 마감", "최종마감", "최종 설치", "동결선", "터파기 깊이",
     "토질상태", "말뚝박기 관련 도서", "말뚝 시공완료", "바닥면의 레벨", "지정공사의 확인",
@@ -36,20 +69,10 @@ BASIC_KEYWORDS = [
 ]
 
 def classify_item(gubun_name, proc_name, idx, raw_cat, text_str):
-    # 1. DB에 이미 '기본외업무'로 명시되어 있으면 그대로 유지
-    if is_extra(raw_cat):
-        return "기본외업무"
-    # 2. 책임상주 감리는 법정 서식상 전 항목 '기본업무'
-    if "상주" in gubun_name:
-        return "기본업무"
-    # 3. 비상주 감리 가설공사: 앞 7개 항목까지 기본업무, 이후는 기본외업무
-    if "가설" in proc_name:
-        return "기본업무" if idx < 7 else "기본외업무"
-    # 4. 기타 비상주 공종: 법정 [별표 1] 기본업무 키워드 매칭
-    low = text_str.lower()
-    if any(kw in low for kw in BASIC_KEYWORDS):
-        return "기본업무"
-    return "기본외업무"
+    if is_extra(raw_cat): return "기본외업무"
+    if "상주" in gubun_name: return "기본업무"
+    if "가설" in proc_name: return "기본업무" if idx < 7 else "기본외업무"
+    return "기본업무" if any(kw in text_str.lower() for kw in BASIC_KW) else "기본외업무"
 
 def extract_items(gubun_name, proc_name, proc_data):
     raw_list = []
@@ -67,14 +90,8 @@ def extract_items(gubun_name, proc_name, proc_data):
                 raw_list.append((str(cat).strip(), clean_txt(txt)))
             else:
                 raw_list.append(("기본업무", clean_txt(item)))
+    return [(classify_item(gubun_name, proc_name, idx, rc, rt), rt) for idx, (rc, rt) in enumerate(raw_list)]
 
-    out = []
-    for idx, (rc, rt) in enumerate(raw_list):
-        final_cat = classify_item(gubun_name, proc_name, idx, rc, rt)
-        out.append((final_cat, rt))
-    return out
-
-# 1. 감리 구분 및 공사 개요
 st.subheader("1. 감리 구분 및 공사 개요")
 gubun = st.radio("감리업무 구분", ["비상주 감리", "책임상주 감리"], horizontal=True)
 site_name = st.text_input("공사명", value="서탄산업단지 (주)노바테크놀러지스 신축공사")
@@ -89,7 +106,6 @@ inspector = c4.text_input("건축사보(감리원)", value="", placeholder="성�
 chief_supervisor = c5.text_input("총괄감리책임자", value="", placeholder="성명 입력")
 contractor = c6.text_input("총괄 시공 책임자", value="", placeholder="성명 입력")
 
-# 2. 공종별 체크리스트
 st.subheader(f"2. [{gubun}] 공종별 체크리스트")
 task_mode = st.radio("업무 구분 선택", ["기본업무", "기본외업무"], horizontal=True)
 selected_procs = st.multiselect("금일 감리 공종 선택", list(DB[gubun].keys()))
@@ -99,61 +115,21 @@ for proc in selected_procs:
     all_items = extract_items(gubun, proc, DB[gubun][proc])
     b_items = [(c, t) for c, t in all_items if not is_extra(c)]
     e_items = [(c, t) for c, t in all_items if is_extra(c)]
-
-    # 기본업무 선택 시 기본업무만 / 기본외업무 선택 시 기본+기본외 전체
     show_items = b_items if task_mode == "기본업무" else all_items
 
-    with st.expander(f"📋 {proc} (기본업무 {len(b_items)}건 / 기본외업무 {len(e_items)}건) → 현재 출력 {len(show_items)}건", expanded=True):
+    with st.expander(f"📋 {proc} (기본업무 {len(b_items)}건 / 기본외업무 {len(e_items)}건) → 출력 {len(show_items)}건", expanded=True):
         check_results[proc] = []
         for idx, (c_str, i_str) in enumerate(show_items):
             col_t, col_r = st.columns([3, 1])
-            badge = "🔵" if is_extra(c_str) else "🟢"
-            col_t.write(f"{badge} **[{c_str}]** {i_str}")
+            col_t.write(f"{'🔵' if is_extra(c_str) else '🟢'} **[{c_str}]** {i_str}")
             res = col_r.selectbox("결과", ["적합", "부적합", "해당없음"], key=f"{proc}_{task_mode}_{idx}", label_visibility="collapsed")
             check_results[proc].append({"cat": c_str, "item": i_str, "res": res})
 
-# 3. 특기사항 및 지적사항
 st.subheader("3. 특기사항 및 지적사항")
 special_note = st.text_area("특기사항", value="- 해당공정 인부 안전관리 철저 주문\n- 용접공정이나 기타 인화물질자재 사용시 화재 안전기준 철저 주문")
 issue_note = st.text_area("지적사항 및 처리결과", value="")
 
-# 4. 현장 사진 업로드
-st.subheader("4. 📸 현장 사진 업로드 (사진대지 자동 병합)")
-if "photos_bin" not in st.session_state:
-    st.session_state["photos_bin"] = []
-
-up_files = st.file_uploader("앨범에서 현장 사진 선택 (여러 장 가능)", accept_multiple_files=True, key="album_up")
-if up_files:
-    temp_imgs = []
-    for f_obj in up_files:
-        try:
-            b_raw = f_obj.getvalue()
-            im = ImageOps.exif_transpose(Image.open(io.BytesIO(b_raw))).convert("RGB")
-            im.thumbnail((900, 900))
-            out_b = io.BytesIO()
-            im.save(out_b, format="JPEG", quality=82)
-            temp_imgs.append((f_obj.name, out_b.getvalue()))
-        except Exception as err:
-            st.warning(f"사진 변환 실패({f_obj.name}): {err}")
-    if temp_imgs:
-        st.session_state["photos_bin"] = temp_imgs
-
-photo_data_list = []
-if st.session_state["photos_bin"]:
-    c_ok, c_del = st.columns([3, 1])
-    c_ok.success(f"✅ 앨범 사진 {len(st.session_state['photos_bin'])}장 첨부 완료 (PDF 맨 뒤에 자동 병합됨)")
-    if c_del.button("사진 모두 지우기"):
-        st.session_state["photos_bin"] = []
-        st.rerun()
-    cols = st.columns(2)
-    for i, (fn, jb) in enumerate(st.session_state["photos_bin"]):
-        with cols[i % 2]:
-            st.image(jb, caption=f"사진 {i+1}", use_container_width=True)
-            cap = st.text_input(f"사진 {i+1} 설명", value=f"시공 현황 ({location})", key=f"pcap_{i}")
-            photo_data_list.append((jb, cap))
-
-# 5. 결재 도장/서명 첨부
-st.subheader("5. ✍️ 결재 도장/서명 첨부")
+st.subheader("4. ✍️ 결재 도장/서명 첨부")
 s1, s2 = st.columns(2)
 stamp_insp = s1.file_uploader("건축사보(감리원) 도장/서명", type=["png", "jpg", "jpeg"])
 stamp_chief = s2.file_uploader("총괄감리책임자 도장/서명", type=["png", "jpg", "jpeg"])
@@ -227,7 +203,6 @@ def build_diary(tmp, d_str, si, sc):
     tbl.alignment, tbl.style = WD_TABLE_ALIGNMENT.CENTER, "Table Grid"
     fix_table(tbl, [34, 72, 22, 29, 29])
     for idx, h in enumerate([7, 14, 9, 9, 10]): set_h(tbl.rows[idx], h)
-
     style_cell(tbl.cell(0, 0).merge(tbl.cell(1, 2)), "공  사  감  리  일  지", 18, True, WD_ALIGN_PARAGRAPH.CENTER)
     style_cell(tbl.cell(0, 3), "건축사보", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(0, 4), "총괄감리책임자", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
@@ -241,7 +216,6 @@ def build_diary(tmp, d_str, si, sc):
     style_cell(tbl.cell(3, 4), weather, 9, False, WD_ALIGN_PARAGRAPH.CENTER)
     style_cell(tbl.cell(4, 0), f"공종 및 세부공정\n({location})", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(4, 1).merge(tbl.cell(4, 4)), "감 리 내 용 (감리항목 및 확인결과)", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-
     r = 5
     for proc, items in check_results.items():
         lines = [f"• [{x['cat']}] {x['item']} ({x['res']})" for x in items if x['res'] != "해당없음"]
@@ -255,7 +229,6 @@ def build_diary(tmp, d_str, si, sc):
     set_h(tbl.rows[r + 1], 24)
     style_cell(tbl.cell(r + 1, 0), "지적사항 및\n처리결과", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(r + 1, 1).merge(tbl.cell(r + 1, 4)), issue_note if issue_note.strip() else "\n\n", 8.5)
-
     pg = doc.add_paragraph("작성방법: 1.주요/단위공종 및 층수 기재  2.체크리스트 기반 감리항목 기재  3.육안·입회·시험 결과 상세 기재  4.특기사항  5.지적사항 및 처리결과")
     pg.paragraph_format.space_before = Pt(4)
     pg.runs[0].font.size = Pt(7.5)
@@ -272,7 +245,6 @@ def build_chk(tmp, idx, proc, items, s_date):
     tbl.alignment, tbl.style = WD_TABLE_ALIGNMENT.CENTER, "Table Grid"
     fix_table(tbl, [24, 98, 16, 18, 30])
     for i, h in enumerate([11, 9, 6, 6]): set_h(tbl.rows[i], h)
-
     style_cell(tbl.cell(0, 0).merge(tbl.cell(0, 3)), "공 종 별  감 리  체 크 리 스 트", 15, True, WD_ALIGN_PARAGRAPH.CENTER)
     style_cell(tbl.cell(0, 4), "문서번호 :\n", 8)
     style_cell(tbl.cell(1, 0), "공   종", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
@@ -285,14 +257,12 @@ def build_chk(tmp, idx, proc, items, s_date):
     style_cell(tbl.cell(3, 2), "적합", 8, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(3, 3), "부적합", 8, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(2, 4).merge(tbl.cell(3, 4)), "조치사항", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-
     for i, x in enumerate(items, start=4):
         style_cell(tbl.cell(i, 0), x["cat"], 8, False, WD_ALIGN_PARAGRAPH.CENTER)
         style_cell(tbl.cell(i, 1), x["item"], 8.5)
         style_cell(tbl.cell(i, 2), "✓" if x["res"] == "적합" else "", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER)
         style_cell(tbl.cell(i, 3), "✓" if x["res"] == "부적합" else "", 9.5, True, WD_ALIGN_PARAGRAPH.CENTER)
         style_cell(tbl.cell(i, 4), "", 8)
-
     r = 4 + len(items)
     set_h(tbl.rows[r], 9); set_h(tbl.rows[r + 1], 9)
     style_cell(tbl.cell(r, 0), "시공자점검일", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
