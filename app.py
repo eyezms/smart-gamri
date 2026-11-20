@@ -1,5 +1,5 @@
 import streamlit as st
-import json, os, subprocess, tempfile, io
+import json, os, subprocess, tempfile, io, re
 from datetime import date
 from PIL import Image, ImageOps
 from docx import Document
@@ -11,7 +11,7 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v4.1)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v4.2)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
@@ -153,6 +153,10 @@ def make_doc():
         s.left_margin = s.right_margin = Mm(12)
     return d
 
+def split_proc_label(proc_str):
+    m = re.match(r'^(.+?)\s*\((.+?)\)$', proc_str)
+    return (m.group(1).strip(), m.group(2).strip()) if m else (proc_str, "-")
+
 def build_diary(tmp, d_str, si, sc):
     doc = make_doc()
     p0 = doc.add_paragraph("■ 건축공사 감리세부기준 [별지 제2호서식] <개정 2017. 2. 4.>")
@@ -183,7 +187,7 @@ def build_diary(tmp, d_str, si, sc):
                 tag = f"{x['cat']}/{x['sub']}" if x.get("sub") else x["cat"]
                 lines.append(f"• [{tag}] {x['item']} ({x['res']})")
         set_h(tbl.rows[r], 45)
-        style_cell(tbl.cell(r, 0), proc, 9.5, True, WD_ALIGN_PARAGRAPH.CENTER)
+        style_cell(tbl.cell(r, 0), proc, 9, True, WD_ALIGN_PARAGRAPH.CENTER)
         style_cell(tbl.cell(r, 1).merge(tbl.cell(r, 4)), "\n".join(lines), 8.5)
         r += 1
     set_h(tbl.rows[r], 22)
@@ -201,6 +205,7 @@ def build_diary(tmp, d_str, si, sc):
 
 def build_chk(tmp, idx, proc, items, s_date):
     doc = make_doc()
+    main_p, sub_p = split_proc_label(proc)
     p0 = doc.add_paragraph(f"■ 건축공사 감리세부기준 [별표 1] ({gubun} - {task_mode})")
     p0.paragraph_format.space_after = Pt(3)
     p0.runs[0].font.size = Pt(8.5)
@@ -211,7 +216,8 @@ def build_chk(tmp, idx, proc, items, s_date):
     style_cell(tbl.cell(0, 0).merge(tbl.cell(0, 3)), "공 종 별  감 리  체 크 리 스 트", 15, True, WD_ALIGN_PARAGRAPH.CENTER)
     style_cell(tbl.cell(0, 4), "문서번호 :\n", 8)
     style_cell(tbl.cell(1, 0), "공   종", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
-    style_cell(tbl.cell(1, 1), proc, 9.5, True)
+    proc_disp = f"{main_p}  [세부공종: {sub_p}]" if sub_p != "-" else main_p
+    style_cell(tbl.cell(1, 1), proc_disp, 9, True)
     style_cell(tbl.cell(1, 2).merge(tbl.cell(1, 3)), "부위/위치", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(1, 4), location, 8.5, False, WD_ALIGN_PARAGRAPH.CENTER)
     style_cell(tbl.cell(2, 0).merge(tbl.cell(3, 0)), "구  분", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
