@@ -11,7 +11,7 @@ from docx.oxml.ns import nsdecls, qn
 from pypdf import PdfWriter
 
 st.set_page_config(page_title="공사감리일지 & 체크리스트", page_icon="🏗️", layout="centered")
-st.title("🏗️ 공사감리일지 & 체크리스트 (v5.0)")
+st.title("🏗️ 공사감리일지 & 체크리스트 (v5.1)")
 
 with open("checklist_db.json", "r", encoding="utf-8") as f:
     DB = json.load(f)
@@ -39,7 +39,15 @@ selected_procs = st.multiselect("금일 감리 공종 선택", list(DB[gubun].ke
 
 full_check_data = {}
 for proc in selected_procs:
-    all_items = DB[gubun][proc]
+    # 중복 항목 제거하면서 순서 유지
+    seen = set()
+    all_items = []
+    for x in DB[gubun][proc]:
+        key_t = (x["cat"], x.get("sub", "-"), x["item"])
+        if key_t not in seen:
+            seen.add(key_t)
+            all_items.append(x)
+
     b_cnt = sum(1 for x in all_items if x["cat"] == "기본업무")
     e_cnt = sum(1 for x in all_items if x["cat"] != "기본업무")
 
@@ -47,7 +55,6 @@ for proc in selected_procs:
         full_check_data[proc] = []
         for idx, x in enumerate(all_items):
             is_basic = (x["cat"] == "기본업무")
-            # 화면 필터링만 적용, 데이터는 전체 보존
             if view_filter == "기본업무만 보기" and not is_basic:
                 res = st.session_state.get(f"chk_{proc}_{idx}", "미선택")
                 note_val = ""
@@ -56,7 +63,7 @@ for proc in selected_procs:
                 badge = "🟢" if is_basic else "🔵"
                 sub_tag = f" | {x['sub']}" if x.get("sub") else ""
                 col_t.write(f"{badge} **[{x['cat']}{sub_tag}]** {x['item']}")
-                default_idx = 1 if is_basic else 0  # 기본업무는 '적합', 기본외업무는 '미선택(공란)' 기본값
+                default_idx = 1 if is_basic else 0
                 res = col_r.selectbox(
                     "결과", ["미선택", "적합", "부적합", "해당없음"],
                     index=default_idx, key=f"chk_{proc}_{idx}", label_visibility="collapsed"
@@ -109,7 +116,7 @@ s1, s2 = st.columns(2)
 stamp_chief = s1.file_uploader("총괄감리책임자 도장/서명", type=["png", "jpg", "jpeg"])
 stamp_insp = s2.file_uploader("건축사보(감리원) 도장/서명", type=["png", "jpg", "jpeg"])
 
-# --- 워드 표 XML 정밀 제어 유틸리티 ---
+# --- 조정 가능한 표 레이아웃 유틸리티 ---
 def fix_table(tbl, widths):
     tbl.autofit = False
     tl = OxmlElement('w:tblLayout')
@@ -138,10 +145,11 @@ def set_h(row, h_mm, exact=False):
     th.set(qn('w:hRule'), 'exact' if exact else 'atLeast')
     row._tr.get_or_add_trPr().append(th)
 
-def style_cell(cell, txt="", sz=8.5, b=False, al=WD_ALIGN_PARAGRAPH.LEFT, bg=None, img=None, pad=(35, 35, 55, 55)):
+def style_cell(cell, txt="", sz=8.5, b=False, al=WD_ALIGN_PARAGRAPH.LEFT, bg=None, img=None, pad=(30, 30, 50, 50)):
     cell.text = ""
     cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
     tp = cell._tc.get_or_add_tcPr()
+    for old_m in tp.findall(qn('w:tcMar')): tp.remove(old_m)
     tm = OxmlElement('w:tcMar')
     for m, v in zip(['top', 'bottom', 'left', 'right'], pad):
         nd = OxmlElement(f'w:{m}')
@@ -149,11 +157,13 @@ def style_cell(cell, txt="", sz=8.5, b=False, al=WD_ALIGN_PARAGRAPH.LEFT, bg=Non
         nd.set(qn('w:type'), 'dxa')
         tm.append(nd)
     tp.append(tm)
-    if bg: tp.append(parse_xml(f'<w:shd {nsdecls("w")} w:fill="{bg}"/>'))
+    if bg:
+        for old_s in tp.findall(qn('w:shd')): tp.remove(old_s)
+        tp.append(parse_xml(f'<w:shd {nsdecls("w")} w:fill="{bg}"/>'))
     p = cell.paragraphs[0]
     p.alignment = al
     p.paragraph_format.space_before = p.paragraph_format.space_after = Pt(0)
-    p.paragraph_format.line_spacing = 1.1
+    p.paragraph_format.line_spacing = 1.12
     if txt:
         r = p.add_run(txt)
         r.font.name = "NanumGothic"
@@ -174,14 +184,12 @@ def split_proc_label(proc_str):
     m = re.match(r'^(.+?)\s*\((.+?)\)$', proc_str)
     return (m.group(1).strip(), m.group(2).strip()) if m else (proc_str, "-")
 
-# [1페이지] 별지 제2호서식 공사감리일지 (업로드 PDF 1p와 동일 양식)
 def build_diary(tmp, d_str, sc, si):
     doc = make_doc()
     p0 = doc.add_paragraph("■ 건축공사 감리세부기준 [별지 제2호서식] <개정 2017. 2. 4.>")
     p0.paragraph_format.space_after = Pt(2)
     p0.runs[0].font.size = Pt(8)
 
-    # 감리일지 본문 행 구성: 적합/부적합 선택된 항목만 공종-감리항목별로 그룹핑
     diary_rows = []
     for proc, items in full_check_data.items():
         main_p, _ = split_proc_label(proc)
@@ -199,7 +207,6 @@ def build_diary(tmp, d_str, sc, si):
     if not diary_rows:
         diary_rows.append(("-", "-", "-", True))
 
-    # 6열 그리드: [일련번호/공종(34), 감리항목(30), 내용좌(56), 날씨/결재1(33), 결재2(33)] = 186mm
     total_rows = 6 + len(diary_rows)
     tbl = doc.add_table(rows=total_rows, cols=5)
     tbl.alignment, tbl.style = WD_TABLE_ALIGNMENT.CENTER, "Table Grid"
@@ -210,7 +217,6 @@ def build_diary(tmp, d_str, sc, si):
     set_h(tbl.rows[2], 9)
     set_h(tbl.rows[3], 9)
 
-    # 상단 헤더: 일련번호 | 공사감리일지 | 총괄감리책임자 | 건축사보
     style_cell(tbl.cell(0, 0), "일련번호", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(1, 0), serial_no, 9, False, WD_ALIGN_PARAGRAPH.CENTER)
     style_cell(tbl.cell(0, 1).merge(tbl.cell(1, 2)), "공 사 감 리 일 지", 18, True, WD_ALIGN_PARAGRAPH.CENTER)
@@ -219,30 +225,33 @@ def build_diary(tmp, d_str, sc, si):
     style_cell(tbl.cell(1, 3), f"{chief_sup} (서명 또는 인)", 8, False, WD_ALIGN_PARAGRAPH.CENTER, img=sc)
     style_cell(tbl.cell(1, 4), f"{inspector} (서명 또는 인)", 8, False, WD_ALIGN_PARAGRAPH.CENTER, img=si)
 
-    # 공사명 | 작성일 및 날씨
     style_cell(tbl.cell(2, 0), "공 사 명", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(2, 1).merge(tbl.cell(2, 2)), site_name, 9, True)
     style_cell(tbl.cell(2, 3).merge(tbl.cell(2, 4)), f"{d_str}  날씨 : {weather}", 8.5, False, WD_ALIGN_PARAGRAPH.CENTER)
 
-    # 공종 및 세부공정 | 감리 항목 | 감리내용
     style_cell(tbl.cell(3, 0), f"공종 및 세부공정\n({floor_txt})", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(3, 1), "감리 항목", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(3, 2).merge(tbl.cell(3, 4)), "감 리 내 용", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
 
     r = 4
-    merge_start = None
-    for idx_r, (p_lbl, s_lbl, c_txt, is_first) in enumerate(diary_rows):
-        set_h(tbl.rows[r], 16)
+    merge_spans = []
+    cur_start, cur_label = None, ""
+    for p_lbl, s_lbl, c_txt, is_first in diary_rows:
+        set_h(tbl.rows[r], 14)
         if is_first:
-            if merge_start is not None and r - 1 > merge_start:
-                tbl.cell(merge_start, 0).merge(tbl.cell(r - 1, 0))
-            merge_start = r
-            style_cell(tbl.cell(r, 0), p_lbl, 9, True, WD_ALIGN_PARAGRAPH.CENTER)
+            if cur_start is not None:
+                merge_spans.append((cur_start, r - 1, cur_label))
+            cur_start, cur_label = r, p_lbl
         style_cell(tbl.cell(r, 1), s_lbl, 8.5, False, WD_ALIGN_PARAGRAPH.CENTER)
         style_cell(tbl.cell(r, 2).merge(tbl.cell(r, 4)), c_txt, 8.5)
         r += 1
-    if merge_start is not None and r - 1 > merge_start:
-        tbl.cell(merge_start, 0).merge(tbl.cell(r - 1, 0))
+    if cur_start is not None:
+        merge_spans.append((cur_start, r - 1, cur_label))
+
+    # 병합 후 텍스트 1회만 입력
+    for sr, er, lbl in merge_spans:
+        c = tbl.cell(sr, 0).merge(tbl.cell(er, 0)) if er > sr else tbl.cell(sr, 0)
+        style_cell(c, lbl, 9, True, WD_ALIGN_PARAGRAPH.CENTER)
 
     set_h(tbl.rows[r], 22)
     style_cell(tbl.cell(r, 0), "특기사항", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
@@ -272,7 +281,6 @@ def build_diary(tmp, d_str, sc, si):
     doc.save(out)
     return out
 
-# [2~3페이지] 현장사진 (업로드 PDF 2~3p와 동일: 2열 × 3행 = 페이지당 6장)
 def build_photos(plist, tmp):
     doc = make_doc()
     pt = doc.add_paragraph("현 장 사 진")
@@ -280,7 +288,6 @@ def build_photos(plist, tmp):
     pt.paragraph_format.space_after = Pt(4)
     pt.runs[0].font.size, pt.runs[0].bold = Pt(14), True
 
-    # 6장 단위로 페이지 분할 (2열 x 3세트(사진행+설명행))
     for page_start in range(0, len(plist), 6):
         if page_start > 0:
             doc.add_page_break()
@@ -301,7 +308,7 @@ def build_photos(plist, tmp):
                     cb, cap = chunk[item_idx]
                     pp = os.path.join(tmp, f"p_{page_start + item_idx}.jpg")
                     with open(pp, "wb") as fo: fo.write(cb)
-                    style_cell(img_row.cells[col_j], "", 8, False, WD_ALIGN_PARAGRAPH.CENTER, img=None, pad=(20, 20, 20, 20))
+                    style_cell(img_row.cells[col_j], "", 8, False, WD_ALIGN_PARAGRAPH.CENTER, pad=(20, 20, 20, 20))
                     p_img = img_row.cells[col_j].paragraphs[0]
                     p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     p_img.add_run().add_picture(pp, width=Mm(84), height=Mm(62))
@@ -314,15 +321,13 @@ def build_photos(plist, tmp):
     doc.save(out)
     return out
 
-# [4~5페이지] 공종별 감리 체크리스트 (업로드 PDF 4~5p와 100% 동일: 7열 표 + 기본/기본외 전체 출력)
 def build_chk(tmp, idx, proc, items, s_date):
     doc = make_doc()
     main_p, sub_p = split_proc_label(proc)
 
-    # 7열 그리드: [구분(14), 세부구분(20), 검사항목(76), 기준참고(22), 적합(11), 부적합(13), 조치사항(30)] = 186mm
     tbl = doc.add_table(rows=8 + len(items), cols=7)
     tbl.alignment, tbl.style = WD_TABLE_ALIGNMENT.CENTER, "Table Grid"
-    fix_table(tbl, [14, 20, 76, 22, 11, 13, 30])
+    fix_table(tbl, [15, 22, 75, 20, 11, 13, 30])
 
     set_h(tbl.rows[0], 11)
     set_h(tbl.rows[1], 8)
@@ -330,23 +335,19 @@ def build_chk(tmp, idx, proc, items, s_date):
     set_h(tbl.rows[3], 6)
     set_h(tbl.rows[4], 6)
 
-    # Row 0: 제목 | 문서번호
     style_cell(tbl.cell(0, 0).merge(tbl.cell(0, 5)), "공 종 별  감 리  체 크 리 스 트", 15, True, WD_ALIGN_PARAGRAPH.CENTER)
     style_cell(tbl.cell(0, 6), "문서번호\n", 8, False, WD_ALIGN_PARAGRAPH.LEFT)
 
-    # Row 1: 공종 | [공종] | 세부공종 | [세부공종]
     style_cell(tbl.cell(1, 0).merge(tbl.cell(1, 1)), "공  종", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(1, 2), main_p, 9, True)
     style_cell(tbl.cell(1, 3), "세부공종", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(1, 4).merge(tbl.cell(1, 6)), sub_p, 8.5, False, WD_ALIGN_PARAGRAPH.CENTER)
 
-    # Row 2: 부위 | 층 | [층] | 위치 | [위치]
     style_cell(tbl.cell(2, 0).merge(tbl.cell(2, 1)), "부  위", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(2, 2), f"층 : {floor_txt}", 8.5)
     style_cell(tbl.cell(2, 3), "위  치", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(2, 4).merge(tbl.cell(2, 6)), loc_txt, 8.5, False, WD_ALIGN_PARAGRAPH.CENTER)
 
-    # Row 3~4: 2단 헤더
     style_cell(tbl.cell(3, 0).merge(tbl.cell(4, 0)), "구분", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(3, 1).merge(tbl.cell(4, 1)), "세부구분", 8, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(3, 2).merge(tbl.cell(4, 2)), "검  사  항  목", 9, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
@@ -356,35 +357,38 @@ def build_chk(tmp, idx, proc, items, s_date):
     style_cell(tbl.cell(4, 5), "부적합", 7.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
     style_cell(tbl.cell(3, 6).merge(tbl.cell(4, 6)), "조치사항", 8.5, True, WD_ALIGN_PARAGRAPH.CENTER, "F2F2F2")
 
-    # 데이터 행 채우기 + 구분(col 0) & 세부구분(col 1) 세로 병합
+    # 1) 우측 열(검사항목~조치사항) 먼저 채우기 (0열과 1열은 비워둠)
     start_r = 5
     for i, x in enumerate(items):
         r = start_r + i
-        style_cell(tbl.cell(r, 0), x["cat"], 7.5, True, WD_ALIGN_PARAGRAPH.CENTER, pad=(25, 25, 25, 25))
-        style_cell(tbl.cell(r, 1), x["sub"], 7.5, False, WD_ALIGN_PARAGRAPH.CENTER, pad=(25, 25, 25, 25))
         style_cell(tbl.cell(r, 2), x["item"], 8, False, WD_ALIGN_PARAGRAPH.LEFT, pad=(25, 25, 45, 45))
         style_cell(tbl.cell(r, 3), "", 7.5, False, WD_ALIGN_PARAGRAPH.CENTER)
         style_cell(tbl.cell(r, 4), "✓" if x["res"] == "적합" else "", 9, True, WD_ALIGN_PARAGRAPH.CENTER)
         style_cell(tbl.cell(r, 5), "✓" if x["res"] == "부적합" else "", 9, True, WD_ALIGN_PARAGRAPH.CENTER)
         style_cell(tbl.cell(r, 6), x.get("note", ""), 7.5, False, WD_ALIGN_PARAGRAPH.CENTER)
 
-    # 구분(col 0) 세로 병합
+    # 2) 구분(0열) 먼저 세로 병합 후 글자 1회만 입력 (중복 글씨 원천 차단)
     c0_start = start_r
     for i in range(1, len(items) + 1):
         if i == len(items) or items[i]["cat"] != items[c0_start - start_r]["cat"]:
-            if start_r + i - 1 > c0_start:
-                tbl.cell(c0_start, 0).merge(tbl.cell(start_r + i - 1, 0))
+            end_r = start_r + i - 1
+            cat_txt = items[c0_start - start_r]["cat"]
+            # '기본외업무'는 세로 공간에 맞춰 깔끔하게 줄바꿈
+            disp_cat = "기본\n외\n업무" if "외" in cat_txt else "기본\n업무"
+            cell_0 = tbl.cell(c0_start, 0).merge(tbl.cell(end_r, 0)) if end_r > c0_start else tbl.cell(c0_start, 0)
+            style_cell(cell_0, disp_cat, 8, True, WD_ALIGN_PARAGRAPH.CENTER, pad=(20, 20, 15, 15))
             c0_start = start_r + i
 
-    # 세부구분(col 1) 세로 병합
+    # 3) 세부구분(1열) 먼저 세로 병합 후 글자 1회만 입력 (중복 글씨 원천 차단)
     c1_start = start_r
     for i in range(1, len(items) + 1):
         if i == len(items) or (items[i]["cat"], items[i]["sub"]) != (items[c1_start - start_r]["cat"], items[c1_start - start_r]["sub"]):
-            if start_r + i - 1 > c1_start:
-                tbl.cell(c1_start, 1).merge(tbl.cell(start_r + i - 1, 1))
+            end_r = start_r + i - 1
+            sub_txt = items[c1_start - start_r]["sub"]
+            cell_1 = tbl.cell(c1_start, 1).merge(tbl.cell(end_r, 1)) if end_r > c1_start else tbl.cell(c1_start, 1)
+            style_cell(cell_1, sub_txt, 7.5, False, WD_ALIGN_PARAGRAPH.CENTER, pad=(20, 20, 20, 20))
             c1_start = start_r + i
 
-    # 하단 서명란 (시공자점검일 / 감리자점검일 / 첨부자료)
     r = start_r + len(items)
     set_h(tbl.rows[r], 12)
     set_h(tbl.rows[r + 1], 12)
@@ -422,7 +426,6 @@ if st.button("📄 통합 감리일지 PDF 생성", type="primary", use_containe
                     si = os.path.join(tmp, "si.png")
                     Image.open(io.BytesIO(stamp_insp.getvalue())).save(si)
 
-                # 업로드 PDF와 동일한 페이지 순서: 1.감리일지 -> 2.현장사진 -> 3.공종별 체크리스트
                 docs = [build_diary(tmp, d_str, sc, si)]
                 if photo_data_list:
                     docs.append(build_photos(photo_data_list, tmp))
